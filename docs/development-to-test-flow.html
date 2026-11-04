@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>代码开发至自动测试流程</title>
+  <style>
+    :root { color-scheme: light; --ink: #18232d; --line: #ccd5dc; --paper: #fff; }
+    * { box-sizing: border-box; }
+    body { margin: 0; color: var(--ink); background: #edf1f3; font-family: "Microsoft YaHei", "PingFang SC", sans-serif; }
+    header { background: var(--paper); border-bottom: 1px solid var(--line); padding: 22px 28px 16px; }
+    h1 { margin: 0 0 8px; font-size: 24px; font-weight: 650; }
+    .summary { margin: 0; font-size: 14px; line-height: 1.7; color: #4b5963; }
+    .toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 12px 28px; background: white; border-bottom: 1px solid var(--line); }
+    button { height: 36px; padding: 0 12px; border: 1px solid #bbc7cf; border-radius: 4px; background: white; color: var(--ink); font: inherit; font-size: 13px; cursor: pointer; }
+    button:hover { background: #edf5f7; border-color: #187c82; }
+    button:focus-visible { outline: 3px solid #187c82; outline-offset: 2px; }
+    .icon { width: 36px; padding: 0; font-size: 22px; }
+    output { width: 52px; text-align: center; font-size: 13px; }
+    .legend { display: flex; flex-wrap: wrap; gap: 14px; margin-left: auto; font-size: 12px; }
+    .key { display: inline-flex; align-items: center; gap: 5px; }
+    .dot { width: 10px; height: 10px; border: 1px solid #6b7a86; background: #fff; }
+    .human { background: #fff2ce; border-color: #ac740a; }
+    .test { background: #e5f4f1; border-color: #187c82; }
+    .error { background: #ffeded; border-color: #b94444; }
+    main { padding: 18px 24px 32px; }
+    #viewport { height: 72vh; min-height: 360px; overflow: auto; border: 1px solid #bdcbd3; background: #fff; }
+    #diagram { display: block; max-width: none; }
+    .notes { max-width: 1200px; margin: 20px auto 0; display: grid; grid-template-columns: repeat(3, 1fr); gap: 24px; }
+    .notes h2 { font-size: 15px; margin: 0 0 8px; }
+    .notes p { font-size: 13px; line-height: 1.8; margin: 0; color: #465560; }
+    footer { max-width: 1200px; margin: 20px auto 0; font-size: 12px; color: #52636e; line-height: 1.8; }
+    @media (max-width: 680px) { header { padding: 18px 16px; } h1 { font-size: 20px; } .toolbar { padding: 10px 16px; } .legend { width: 100%; margin-left: 0; } main { padding: 12px; } .notes { grid-template-columns: 1fr; gap: 16px; } }
+    @media print { body { background: white; } .toolbar { display: none; } #viewport { height: auto; overflow: visible; border: none; } #diagram { width: 100% !important; height: auto !important; } main { padding: 0; } }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>代码开发完成 → 用例自动执行完成</h1>
+    <p class="summary">当前实现：工程检查 → 人工发布确认 → 用例生成 → 串行执行 → 证据保存与结果判定</p>
+  </header>
+  <div class="toolbar" aria-label="流程图工具栏">
+    <button class="icon" id="minus" title="缩小" aria-label="缩小">−</button>
+    <output id="scale" aria-live="polite">100%</output>
+    <button class="icon" id="plus" title="放大" aria-label="放大">+</button>
+    <button id="fit">适配宽度</button>
+    <button id="reset">原始大小</button>
+    <button id="download">下载 SVG</button>
+    <div class="legend"><span class="key"><i class="dot"></i>平台步骤</span><span class="key"><i class="dot human"></i>人工操作</span><span class="key"><i class="dot test"></i>模型 / 执行器</span><span class="key"><i class="dot error"></i>失败 / 待处理</span></div>
+  </div>
+  <main>
+    <div id="viewport" tabindex="0" aria-label="可滚动流程图">
+      <svg id="diagram" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 2240" role="img" aria-labelledby="chart-title chart-desc">
+        <title id="chart-title">开发完成到自动测试完成泳道图</title>
+        <desc id="chart-desc">用户、平台后台、Copilot 与测试执行器三条泳道，包含发布确认、单文件测试、浏览器测试和失败重试。</desc>
+        <defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#526575"/></marker></defs>
+      </svg>
+    </div>
+    <section class="notes" aria-label="流程边界">
+      <div><h2>发布与测试的先后关系</h2><p>推送只包含确认时的变更。后续生成的测试文件留在本地，不会自动补推，也不自动创建 PR、合并主分支或部署。</p></div>
+      <div><h2>自动执行的前置条件</h2><p>测试文件优先执行；没有测试文件且提供本机 HTTP 预览地址才走浏览器。被测应用需提前启动，平台不会自动启动应用。</p></div>
+      <div><h2>重试与中断</h2><p>用例规划与执行共用最多三轮循环，浏览器脚本格式最多修正一次。服务重启中断自测时转为 REVIEW，保留记录供继续自测。</p></div>
+    </section>
+    <footer>实现依据：server/execution/worker.ts · server/index.ts · server/verification/self-test.ts · server/verification/browser-automation.ts · server/git/publish.ts · server/tasks/store.ts。该图描述代码实现，不代表某个任务已经运行通过。</footer>
+  </main>
+  <script>
+    const svg = document.getElementById('diagram');
+    const namespace = 'http://www.w3.org/2000/svg';
+    function element(tag, attributes, parent = svg) {
+      const item = document.createElementNS(namespace, tag);
+      for (const [key, value] of Object.entries(attributes)) item.setAttribute(key, String(value));
+      parent.appendChild(item);
+      return item;
+    }
+    function text(content, position, parent = svg) {
+      const item = element('text', { ...position, fill: '#18232d', 'font-family': 'Microsoft YaHei, PingFang SC, sans-serif', 'font-size': 14 }, parent);
+      item.textContent = content;
+      return item;
+    }
+    element('rect', { width: 1200, height: 2240, fill: '#ffffff' });
+    const lanes = ['用户操作', '平台后台', 'Copilot / 测试执行器'];
+    lanes.forEach((label, index) => {
+      element('rect', { x: index * 400, y: 0, width: 400, height: 2240, fill: ['#fffdf5', '#f7f9fb', '#f3faf8'][index] });
+      element('rect', { x: index * 400, y: 0, width: 400, height: 64, fill: ['#f7e8be', '#dfe8ef', '#cfe9e3'][index] });
+      text(label, { x: index * 400 + 200, y: 39, 'text-anchor': 'middle', 'font-size': 18, 'font-weight': 700 });
+      if (index) element('line', { x1: index * 400, y1: 0, x2: index * 400, y2: 2240, stroke: '#cbd7df' });
+    });
+    const nodes = [
+      { id: 'done', lane: 2, y: 90, title: '01  代码开发完成', lines: ['Copilot 返回完成消息'], kind: 'test' },
+      { id: 'changes', lane: 1, y: 220, title: '02  汇总代码变更', lines: ['保存 changes；无变更 → FAILED'] },
+      { id: 'checks', lane: 1, y: 350, title: '03  执行已有工程检查', lines: ['依次运行存在的 npm run test / build', '每项最多 180 秒；失败记录但不阻断'] },
+      { id: 'snapshot', lane: 1, y: 480, title: '04  准备发布审批', lines: ['校验分支、远端及文件，生成快照', '进入 PUBLISH_PENDING，停止等待'] },
+      { id: 'approve', lane: 0, y: 610, title: '05  人工确认发布', lines: ['确认推送，或明确跳过推送', '未选择则不开始自测'], kind: 'human' },
+      { id: 'publish', lane: 1, y: 740, title: '06  推送或保留本地代码', lines: ['确认：校验快照 → 提交 → 推送分支', '跳过：不提交、不推送；继续自测'] },
+      { id: 'publishError', lane: 0, y: 740, title: '推送 / 前置检查失败', lines: ['记录原因，处理后重试', '不会继续生成用例'], kind: 'error' },
+      { id: 'preflight', lane: 1, y: 870, title: '07  启动自测前置检查', lines: ['检查登录、工作目录、任务分支及附件', 'selfTestOnly：跳过克隆和编码'] },
+      { id: 'plan', lane: 2, y: 1000, title: '08  生成验收用例 · SELF_TEST', lines: ['按需求场景分批生成并统一验收', '可自动化项编写独立测试文件'], kind: 'test' },
+      { id: 'validate', lane: 1, y: 1130, title: '09  校验并保存用例清单', lines: ['JSON、数量、字段及重复文件检查', '不合法则反馈修正；耗尽轮次 → REVIEW'] },
+      { id: 'route', lane: 1, y: 1260, title: '10  串行调度 · TEST_EXECUTION', lines: ['逐条选择执行路径，记录 running', '有 testFile 时优先执行测试文件'] },
+      { id: 'manual', lane: 0, y: 1390, title: '条件不足 / 不可执行', lines: ['标记 manual 或 skipped', '记录原因，不伪造通过结果'], kind: 'human' },
+      { id: 'file', lane: 1, y: 1390, title: '单文件测试', lines: ['当前变更、路径、文件和断言校验', '受支持框架单文件运行，最多 120 秒'] },
+      { id: 'browser', lane: 2, y: 1390, title: '浏览器自动化', lines: ['无 testFile 且有本机预览地址', 'JSON 脚本 → 无头 Chrome → 断言截图'], kind: 'test' },
+      { id: 'save', lane: 1, y: 1520, title: '11  保存执行结果与证据', lines: ['每条执行后保存状态、时间和输出', '浏览器额外保存脚本与截图引用'] },
+      { id: 'repair', lane: 2, y: 1650, title: '12  定点修正可重试用例', lines: ['规划与执行共用最多三轮；保留通过项', '不改业务代码；浏览器失败不在同轮重跑'], kind: 'test' },
+      { id: 'result', lane: 1, y: 1780, title: '13  汇总最终结果', lines: ['至少一条用例，全部通过且 checks 全通过', '满足 → SUCCESS；否则 → REVIEW'] },
+      { id: 'success', lane: 2, y: 1910, title: 'SUCCESS · 全部通过', lines: ['自动执行结束，检查和用例均通过'], kind: 'test' },
+      { id: 'review', lane: 0, y: 1910, title: 'REVIEW · 人工验收', lines: ['查看失败、跳过、人工项及错误证据', '自动执行结束不等于全部通过'], kind: 'error' },
+      { id: 'next', lane: 0, y: 2070, title: '后续人工决策', lines: ['继续自测 → 恢复生成 / 执行未完成项', '修复业务代码 → 再走工程检查及发布确认', '接受风险 → ACCEPTED，保留失败证据'], kind: 'human' },
+    ];
+    const positions = new Map(nodes.map(node => [node.id, { ...node, x: node.lane * 400 + 36, width: 328, height: node.id === 'next' ? 118 : 94 }]));
+    const links = [
+      ['done', 'changes'], ['changes', 'checks'], ['checks', 'snapshot'], ['snapshot', 'approve'], ['approve', 'publish'],
+      ['publish', 'preflight'], ['preflight', 'plan'], ['plan', 'validate'], ['validate', 'route'],
+      ['route', 'manual'], ['route', 'file'], ['route', 'browser'], ['manual', 'save'], ['file', 'save'], ['browser', 'save'],
+      ['save', 'repair'], ['repair', 'result'], ['result', 'review'], ['result', 'success'], ['review', 'next'],
+    ];
+    links.forEach(([fromId, toId]) => {
+      const from = positions.get(fromId), to = positions.get(toId);
+      const startX = from.x + from.width / 2, startY = from.y + from.height;
+      const endX = to.x + to.width / 2, endY = to.y;
+      const middleY = (startY + endY) / 2;
+      element('path', { d: `M ${startX} ${startY} V ${middleY} H ${endX} V ${endY - 4}`, fill: 'none', stroke: '#526575', 'stroke-width': 1.8, 'marker-end': 'url(#arrow)' });
+    });
+    element('path', { d: 'M 436 787 H 368', fill: 'none', stroke: '#b94444', 'stroke-width': 1.8, 'stroke-dasharray': '5 4', 'marker-end': 'url(#arrow)' });
+    element('path', { d: 'M 436 917 H 386 V 808 H 368', fill: 'none', stroke: '#b94444', 'stroke-width': 1.8, 'stroke-dasharray': '5 4', 'marker-end': 'url(#arrow)' });
+    element('path', { d: 'M 1164 1697 H 1182 V 1080 H 1168', fill: 'none', stroke: '#187c82', 'stroke-width': 1.8, 'stroke-dasharray': '5 4', 'marker-end': 'url(#arrow)' });
+    const palette = { normal: ['#ffffff', '#647b8c'], human: ['#fff2ce', '#ac740a'], test: ['#e5f4f1', '#187c82'], error: ['#ffeded', '#b94444'] };
+    for (const node of positions.values()) {
+      const group = element('g', {});
+      const [fill, stroke] = palette[node.kind || 'normal'];
+      element('rect', { x: node.x, y: node.y, width: node.width, height: node.height, rx: 5, fill, stroke, 'stroke-width': 1.5 }, group);
+      text(node.title, { x: node.x + 14, y: node.y + 27, 'font-size': 16, 'font-weight': 700 }, group);
+      node.lines.forEach((line, index) => text(line, { x: node.x + 14, y: node.y + 51 + index * 21, 'font-size': 13 }, group));
+    }
+    let zoom = 1;
+    function setZoom(value) {
+      zoom = Math.max(0.2, Math.min(2, value));
+      svg.style.width = `${1200 * zoom}px`;
+      svg.style.height = `${2240 * zoom}px`;
+      document.getElementById('scale').value = `${Math.round(zoom * 100)}%`;
+    }
+    document.getElementById('plus').onclick = () => setZoom(zoom + 0.1);
+    document.getElementById('minus').onclick = () => setZoom(zoom - 0.1);
+    document.getElementById('reset').onclick = () => setZoom(1);
+    document.getElementById('fit').onclick = () => setZoom((document.getElementById('viewport').clientWidth - 2) / 1200);
+    document.getElementById('download').onclick = () => {
+      const copy = svg.cloneNode(true);
+      copy.removeAttribute('style');
+      copy.setAttribute('width', '1200');
+      copy.setAttribute('height', '2240');
+      const url = URL.createObjectURL(new Blob([new XMLSerializer().serializeToString(copy)], { type: 'image/svg+xml;charset=utf-8' }));
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = 'development-to-test-flow.svg';
+      anchor.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    };
+    document.getElementById('fit').click();
+  </script>
+</body>
+</html>

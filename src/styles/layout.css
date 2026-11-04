@@ -1,0 +1,75 @@
+.application-layout { display: grid; grid-template-columns: 192px minmax(0, 1fr); min-height: 100dvh; background: var(--canvas); }
+.application-content { min-width: 0; color: var(--ink); }
+.feature-rail { position: sticky; top: 0; align-self: start; height: 100dvh; padding: 20px 12px; background: var(--rail-background); color: var(--rail-foreground); }
+.feature-brand { display: flex; align-items: center; gap: 10px; min-height: 36px; margin-bottom: 40px; padding: 0 12px; color: #ffffff; font-size: 14px; font-weight: 700; text-decoration: none; }
+.feature-brand svg, .feature-menu svg { flex: none; }
+.feature-menu { display: grid; gap: 6px; }
+.feature-menu > a { position: relative; display: flex; align-items: center; gap: 12px; min-height: 44px; padding: 10px 12px; border-radius: var(--radius); color: var(--rail-foreground); font-size: 13px; font-weight: 500; text-decoration: none; transition: background-color 160ms ease, color 160ms ease; }
+.feature-menu > a:hover { background: #343d37; color: white; }
+.feature-menu > a[aria-current="page"] { background: #e6f3eb; color: #20583f; font-weight: 700; }
+.feature-menu > a[aria-current="page"]::before { content: ''; position: absolute; left: -12px; top: 12px; bottom: 12px; width: 3px; background: #89d3aa; border-radius: 0 2px 2px 0; }
+.feature-menu > a:focus-visible, .feature-brand:focus-visible { outline: 2px solid #a9dfbf; outline-offset: 3px; }
+.feature-tooltip { display: none; }
+.application-content .sidebar { width: 208px; padding: 24px 12px 18px; background: var(--surface); border-color: var(--line); }
+.application-content .sidebar-heading { margin: 0 12px 20px; font-size: 14px; font-weight: 600; }
+.application-content .sidebar-label { margin: 28px 12px 12px; color: var(--muted); }
+.application-content .sidebar .nav-item { width: 100%; background: var(--surface-subtle); color: var(--green); }
+.application-content .sidebar .nav-item:hover { background: #e4eee7; }
+.application-content .task-nav-item { min-height: 52px; }
+.application-content .task-nav-copy small { color: var(--muted); }
+.application-content .empty-nav { padding-block: 12px; color: var(--muted); }
+.application-content .topbar { height: 64px; padding-inline: 32px; font-weight: 500; }
+.application-content .topbar-date { color: var(--muted); }
+.application-content .content { padding: 32px 32px 64px; }
+.application-content .page-wrap { max-width: 1240px; }
+.application-content .page-heading { margin-bottom: 28px; align-items: center; }
+.application-content .page-heading h1 { font-size: 26px; font-weight: 600; color: var(--ink); }
+.application-content .heading-note { color: var(--muted); }
+.application-content .new-task-layout { grid-template-columns: minmax(0, 1fr); max-width: 880px; }
+.application-content .new-task-layout .form-pane { background: transparent; border: 0; border-radius: 0; }
+.application-content .new-task-layout .form-section { padding: 24px 0 28px; }
+.application-content .new-task-layout .form-section:first-child { padding-top: 0; }
+.application-content .section-title { gap: 12px; margin-bottom: 22px; }
+.application-content .section-title p, .application-content .field-label em, .application-content .model-hint { color: var(--muted); }
+.application-content .section-index { width: 28px; height: 28px; border-color: var(--line); background: var(--surface); color: var(--muted); }
+.application-content .input-icon, .application-content .instruction-input { background: var(--surface); }
+.application-content .input-icon input:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 3px; border-radius: 2px; }
+.application-content .new-task-layout .form-footer { padding: 24px 0; flex-wrap: wrap; }
+.application-content .form-footer > span { color: var(--muted); }
+.application-content .testing-shell { background: var(--canvas); }
+.application-content .testing-topbar { min-height: 64px; padding: 16px 32px; }
+.application-content .testing-brand { font-size: 12px; font-weight: 500; }
+.testing-breadcrumb { color: var(--muted); font-size: 12px; }
+.application-content .testing-workspace { padding: 28px 32px; }
+.application-content .testing-workspace h1 { font-size: 26px; font-weight: 600; }
+.application-content .testing-history { padding-right: 16px; }
+.application-content .testing-history a { border-radius: 0; }
+.application-content .testing-history a[aria-current] { background: #eaf1ec; }
+@media (max-width: 1200px) {
+  .application-layout { grid-template-columns: 68px minmax(0, 1fr); }
+  .feature-rail { padding-inline: 10px; }
+  .feature-brand { justify-content: center; padding: 0; }
+  .feature-brand > span, .feature-label { display: none; }
+  .feature-menu > a { justify-content: center; padding-inline: 0; }
+  .feature-menu > a[aria-current="page"]::before { left: -10px; }
+  .feature-menu > a:hover .feature-tooltip, .feature-menu > a:focus-visible .feature-tooltip { display: block; position: absolute; z-index: 50; left: calc(100% + 12px); top: 50%; transform: translateY(-50%); padding: 7px 10px; border: 1px solid #cbd9d0; border-radius: 4px; background: white; color: #304d3d; box-shadow: 0 4px 12px #233b2b1f; font-size: 12px; white-space: nowrap; pointer-events: none; }
+}
+@media (max-width: 700px) {
+  .application-layout { grid-template-columns: 52px minmax(0, 1fr); }
+  .feature-rail { padding: 14px 5px; }
+  .feature-menu > a { min-height: 44px; }
+  .feature-menu > a[aria-current="page"]::before { left: -5px; }
+  .application-content .sidebar { width: 100%; min-height: 0; padding: 16px 12px; }
+  .application-content .sidebar-heading { margin: 0 0 12px; }
+  .application-content .shell { display: block; }
+  .application-content .sidebar .nav-item { position: static; width: 100%; margin: 0; }
+  .application-content .content { padding: 24px 16px 48px; }
+  .application-content .page-heading h1, .application-content .testing-workspace h1 { font-size: 22px; }
+  .application-content .testing-workspace { padding: 20px 16px; }
+  .application-content .testing-heading > h1 { flex-basis: 100%; }
+  .application-content .testing-topbar { padding: 14px 16px; gap: 12px; }
+  .application-content .topbar { height: auto; min-height: 48px; gap: 8px; flex-wrap: wrap; padding-block: 10px; }
+  .application-content .topbar { padding-inline: 16px; }
+  .application-content .topbar-right { gap: 10px; flex-wrap: wrap; }
+}
+@media (prefers-reduced-motion: reduce) { .feature-menu > a { transition: none; } }

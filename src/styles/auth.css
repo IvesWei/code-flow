@@ -1,0 +1,10 @@
+.login-page { min-height: 100dvh; padding: 32px; box-sizing: border-box; background: linear-gradient(180deg, #ffffff 0, #ffffff 80px, #dfe4e1 80px, #dfe4e1 81px, #f5f6f5 81px); color: var(--ink); }
+.login-brand { display: flex; align-items: center; gap: 12px; font-size: 20px; font-weight: 700; }
+.login-content { max-width: 440px; margin: min(18vh, 160px) auto 48px; display: flex; flex-direction: column; align-items: center; gap: 24px; text-align: center; overflow-wrap: anywhere; }
+.login-content h1 { font-size: 30px; line-height: 1.3; margin: 0; }
+.login-content p { display: flex; align-items: center; gap: 10px; line-height: 1.7; margin: 0; }
+.login-content button { min-height: 46px; max-width: 100%; justify-content: center; }
+.login-security { display: flex; align-items: center; gap: 8px; color: #607568; font-size: 12px; }
+.route-loading { min-height: 60vh; display: flex; align-items: center; justify-content: center; gap: 12px; flex-wrap: wrap; padding: 24px; }
+.login-content button:focus-visible { outline: 2px solid #28734e; outline-offset: 4px; }
+@media (max-width: 600px) { .login-page { padding: 24px; }.login-content h1 { font-size: 26px; } }
