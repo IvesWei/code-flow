@@ -1,7 +1,7 @@
 import * as React from 'react'
 import { Pencil, Play, X } from 'lucide-react'
 import { FilterSelect } from '../../components/FilterSelect'
-import type { RequirementRevision, RequirementScreen } from '../../../shared/requirements'
+import type { RequirementJob, RequirementRevision, RequirementScreen } from '../../../shared/requirements'
 import { buildPrototypeDocument, needsScreenshot, prototypeArtboardWidth } from './prototype'
 import { designPageOptions } from './design-pages'
 import { prototypeScreens } from '../../../shared/requirement-prototypes'
@@ -47,9 +47,10 @@ function Prototype({ screen, projectId, revisionId, hasScreenshot }: {
   return <div ref={artboard} className="requirements-artboard" style={{ height: contentHeight * scale }}><iframe ref={frame} title={`${screen.title}原型`} sandbox="allow-scripts" referrerPolicy="no-referrer" srcDoc={document || undefined} style={{ width: prototypeArtboardWidth, height: contentHeight, transform: `scale(${scale})` }} /></div>
 }
 
-export function DesignReview({ revision, projectId, selectedId, adjustmentDisabled = true, onAdjust, preferredScreen, running = false, taskError, onCancel }: {
+export function DesignReview({ revision, projectId, selectedId, adjustmentDisabled = true, onAdjust, preferredScreen, running = false, job, progress, requestError, onRefresh, taskError, onCancel }: {
   revision: RequirementRevision; projectId: string; selectedId: string; adjustmentDisabled?: boolean
   running?: boolean; taskError?: string; onCancel?(): void
+  job?: RequirementJob; progress?: { at: string; text: string }; requestError?: string; onRefresh?(): void
   preferredScreen?: { title: string; state: string }
   onAdjust?(screenId: string, instruction: string): Promise<void>
 }) {
@@ -63,6 +64,10 @@ export function DesignReview({ revision, projectId, selectedId, adjustmentDisabl
   const adjustTrigger = React.useRef<HTMLButtonElement>(null)
   const restoreAdjustmentFocus = React.useRef(false)
   const instructionInput = React.useRef<HTMLTextAreaElement>(null)
+  const conversationLog = React.useRef<HTMLDivElement>(null)
+  React.useEffect(() => {
+    if (adjusting && conversationLog.current) conversationLog.current.scrollTop = conversationLog.current.scrollHeight
+  }, [conversation, adjusting])
   React.useLayoutEffect(() => {
     if (adjusting) { restoreAdjustmentFocus.current = true; if (!dialog.current?.open) dialog.current?.showModal(); instructionInput.current?.focus() }
     else { if (dialog.current?.open) dialog.current.close(); if (restoreAdjustmentFocus.current) { restoreAdjustmentFocus.current = false; adjustTrigger.current?.focus() } }
@@ -98,25 +103,32 @@ export function DesignReview({ revision, projectId, selectedId, adjustmentDisabl
     <div className="requirements-toolbar requirements-design-heading"><h2>设计原型</h2>{screen && <FilterSelect cascade closeOnSelect={false} className="requirements-page-select" label="设计页面" value={screen.id} options={designPageOptions(revision)} onChange={value => { setScreenId(value); setAdjusting(false); setInstruction(''); setError(''); setConversation([]) }} />}{screen && onAdjust && <button ref={adjustTrigger} type="button" disabled={adjustmentDisabled || submitting} aria-haspopup="dialog" onClick={() => setAdjusting(true)}><Pencil size={15} />调整原型</button>}</div>
     {screen ? <>
       <dialog ref={dialog} className="requirements-prototype-editor" aria-label="原型调整" onCancel={event => { event.preventDefault(); setAdjusting(false) }}>
-        <header className="requirements-toolbar"><h2>{screen.title} · 原型调整</h2><button type="button" aria-label="关闭原型调整" title="关闭原型调整" onClick={() => setAdjusting(false)}><X size={16} /></button></header>
+        <header className="requirements-toolbar requirements-prototype-editor-header"><div><h2>{screen.title} · 原型调整</h2><small>当前状态：{screen.state} · 共 {group.length} 个关联状态同步演进</small></div><button type="button" aria-label="关闭原型调整" title="关闭原型调整" onClick={() => setAdjusting(false)}><X size={16} /></button></header>
         <div className="requirements-prototype-editor-body">
-          <section aria-label="原型预览"><FilterSelect label="原型状态" value={screen.id} options={group.map(item => ({ value: item.id, label: item.state }))} onChange={setScreenId} /><div className="requirements-preview">{adjusting && <Prototype key={`editor:${revision.id}:${screen.id}`} screen={screen} projectId={projectId} revisionId={revision.id} hasScreenshot={!!revision.screenshots?.some(item => item.screenId === screen.id)} />}</div></section>
-          <section className="requirements-prototype-conversation" aria-label="原型修改对话"><ul aria-label="同步调整状态">{group.map(item => <li key={item.id}>{item.state}</li>)}</ul><div role="log" aria-label="调整对话记录">{conversation.map((item, index) => <p key={index}><strong>{item.role === 'user' ? '你：' : '系统：'}</strong>{item.text}</p>)}</div>
-          {running && <p role="status">正在调整原型并更新状态截图…{onCancel && <button type="button" onClick={onCancel}>取消任务</button>}</p>}
-          {(error || taskError) && <p role="alert">{error || taskError}</p>}
-          <form aria-label="原型设计调整" onSubmit={event => {
+          <section className="requirements-prototype-stage" aria-label="原型预览"><FilterSelect label="原型状态" value={screen.id} options={group.map(item => ({ value: item.id, label: item.state }))} onChange={setScreenId} /><div className="requirements-preview requirements-artboard-frame">{adjusting && <Prototype key={`editor:${revision.id}:${screen.id}`} screen={screen} projectId={projectId} revisionId={revision.id} hasScreenshot={!!revision.screenshots?.some(item => item.screenId === screen.id)} />}</div></section>
+          <section className="requirements-prototype-conversation" aria-label="原型修改对话"><div className="requirements-sync-states"><span>同步更新状态</span><ul aria-label="同步调整状态">{group.map(item => <li key={item.id} data-active={item.id === screen.id}>{item.state}</li>)}</ul></div><div ref={conversationLog} className="requirements-chat-log" role="log" aria-label="调整对话记录">{!conversation.length && <p className="requirements-chat-empty">填写本轮视觉或布局修改意见，系统将保持全部状态与需求关联一致。</p>}{conversation.map((item, index) => <p key={index} data-role={item.role}><strong>{item.role === 'user' ? '你：' : '系统：'}</strong>{item.text}</p>)}</div>
+          {(submitting || running || job) && <section className="requirements-job-status-card" aria-label="设计任务执行状态">
+            <div role="status" aria-live="polite" aria-atomic="true">
+              <p>{submitting ? '正在提交调整请求，请勿重复发送…' : running ? '任务已接收，正在执行…' : job?.status === 'succeeded' ? '最近设计任务已完成，可查看当前修订的原型和状态截图。' : job?.status === 'cancelled' ? '设计任务已取消，未保存本次候选，原稿保持不变。' : job?.status === 'interrupted' ? '设计任务已中断，尚未完成；请确认后再重试。' : '设计任务失败，原稿保持不变。'}</p>
+              {!submitting && job && <p className="requirements-job-meta">任务编号：{job.id}<br />{job.endedAt ? '结束时间：' : '开始时间：'}<time dateTime={job.endedAt || job.startedAt}>{new Date(job.endedAt || job.startedAt).toLocaleString()}</time></p>}
+              {!submitting && running && <><progress aria-label="设计任务进度" />{progress && <p className="requirements-job-meta"><time dateTime={progress.at}>{new Date(progress.at).toLocaleTimeString()}</time> · {progress.text}</p>}</>}
+            </div>
+            {running && onCancel && <button type="button" onClick={onCancel}>取消任务</button>}
+          </section>}
+          {(error || requestError || taskError) && <div className="requirements-error" role="alert"><p>{error || requestError || taskError}</p>{onRefresh && <button type="button" disabled={submitting} onClick={onRefresh}>重新读取状态</button>}</div>}
+          <form className="requirements-adjust-form" aria-label="原型设计调整" onSubmit={event => {
         event.preventDefault()
         if (!instruction.trim() || submitting || adjustmentDisabled) return
-        const request = [...conversation.filter(item => item.role === 'user').map(item => item.text), instruction.trim()].join('\n\n')
-        if (request.length > 10000) { setError('本轮对话超过长度限制，请精简修改意见'); return }
-        setSubmitting(true); setError('')
         const message = instruction.trim()
-        void onAdjust!(screen.id, request).then(() => { setConversation(previous => [...previous, { role: 'user', text: message }]); setInstruction('') }).catch(caught => setError(caught instanceof Error ? caught.message : '提交失败')).finally(() => setSubmitting(false))
-      }}><fieldset disabled={adjustmentDisabled || submitting}><label>原型修改意见<textarea ref={instructionInput} aria-label="原型修改意见" required maxLength={10000} rows={4} value={instruction} onChange={event => setInstruction(event.target.value)} /></label><button type="submit" disabled={!instruction.trim()}><Play size={15} />发送并调整原型</button></fieldset></form></section>
+        if (message.length > 10000) { setError('本轮修改意见超过长度限制，请精简修改意见'); return }
+        setSubmitting(true); setError('')
+        void onAdjust!(screen.id, message).then(() => { setConversation(previous => [...previous, { role: 'user', text: message }]); setInstruction('') }).catch(caught => setError(caught instanceof Error ? caught.message : '提交失败')).finally(() => setSubmitting(false))
+      }}><fieldset disabled={adjustmentDisabled || submitting}><label>原型修改意见<textarea ref={instructionInput} aria-label="原型修改意见" placeholder="例如：紧凑筛选栏行高，将主操作按钮右对齐，优化表单两列间距…" required maxLength={10000} rows={4} value={instruction} onChange={event => setInstruction(event.target.value)} /></label><button className="requirements-primary-action" type="submit" disabled={!instruction.trim()}><Play size={15} />{submitting ? '正在提交…' : running ? '调整进行中…' : '发送并调整原型'}</button></fieldset></form></section>
         </div>
       </dialog>
-      <div className="requirements-preview"><Prototype key={`${revision.id}:${screen.id}:${screen.html}`} screen={screen} projectId={projectId} revisionId={revision.id} hasScreenshot={!!revision.screenshots?.some(item => item.screenId === screen.id)} /></div>
-      {selectedId && !revision.screens.some(item => item.requirementIds.includes(selectedId)) && <p role="status">当前需求未关联设计页面。</p>}
-    </> : <p>尚未生成设计页面。</p>}
+      <div className="requirements-preview requirements-artboard-frame"><Prototype key={`${revision.id}:${screen.id}:${screen.html}`} screen={screen} projectId={projectId} revisionId={revision.id} hasScreenshot={!!revision.screenshots?.some(item => item.screenId === screen.id)} /></div>
+      {screen.proves && <p className="requirements-proves-note"><strong>状态说明：</strong>{screen.proves}</p>}
+      {selectedId && !revision.screens.some(item => item.requirementIds.includes(selectedId)) && <p role="status" className="requirements-missing-screen">当前需求未关联设计页面。</p>}
+    </> : <p className="requirements-empty">尚未生成设计页面。</p>}
   </div>
 }

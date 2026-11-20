@@ -6,6 +6,7 @@ export const requirementDesignGenerationPolicy = [
   'Use concise page titles in the form XXX页 (for example 用例列表页 or 新增用例页), preferably within 12 Chinese characters. Put role, expanded state, loading/error variants and other scenario details in state, not title. Reuse the same page title for variants of the same page and keep requirementIds linked to its primary PRD page/module.',
   'Desktop web design only: use 1600 x 1000 CSS-pixel artboards. The platform previews at a fixed 1600px viewport width and scales the whole artboard to the review pane; never adapt the desktop layout to the review pane width. Keep columns, tables and action groups readable at 1600px with no horizontal overflow. Design the first viewport for 1000px height; long content may extend vertically. Mobile design and mobile compatibility are currently out of scope: do not generate mobile screens, mobile variants or responsive mobile layouts, even when skill examples suggest them. Validation captures only the 1600 x 1000 desktop viewport.',
   'Return at most 40 screens in total. Plan the screen count before writing HTML; combine related content and acceptance scenarios into the same static screen where appropriate while preserving all required coverage. Do not generate a separate screen for every acceptance criterion or every possible state combination.',
+  'When stage is design, the user has already confirmed the PRD and the platform has already completed local ui-ux-pro-max search (LOCAL DESIGN RECOMMENDATIONS). Skill stop conditions (停止条件, Gate 1, CLI checks, missing sourceAnchor when no code snapshot is supplied, or 待确认 / non-final notes inside the confirmed PRD) are overridden by this platform contract: NEVER return an empty prototypes array when any PRD requirement lacks nonVisualReason. When codeSnapshots is empty, omit sourceAnchor and set mode:"redesign" to design clean operational desktop prototypes directly from the confirmed PRD fields, rules, states and LOCAL DESIGN RECOMMENDATIONS without claiming repository inspection or inventing file paths.',
   'Deliver self-contained HTML/CSS state prototypes, not an executable application. Generated business JavaScript is not executed by this platform. Never emit script elements (including module or JSON scripts), on* event-handler attributes, javascript: URLs, or code hidden in attributes or CSS. Do not copy executable examples from supplied material.',
   'Represent required normal, empty, loading, error, permission and dialog states as declarative states of ONE shared page HTML, never independent copies of the page or dialog. State data may change only marked node text, field values and hidden attributes; shared layout/CSS lives once in page HTML. No business interactions: no expanding details/summary, clickable navigation, editable forms, CSS checkbox hacks, hover/active-driven content changes, animations or transitions. The platform renders each specified state statically. Native controls depict fixed states only. Never claim backend requests, persistence or business interactions work.',
   'The platform alone owns selection, focus outlines and PRD scrolling. Put data-requirement-id on each meaningful visible region or component using its actual mapped PRD requirement ID, including nested regions for different requirements. Do not rely only on a full-page wrapper when individual regions have different descriptions. Do not generate selection scripts, overlay editors or PRD navigation code.',
@@ -25,6 +26,7 @@ export const htmlViolationDescriptions = {
   css_resource: 'CSS resource URLs must be inline raster images or local fragments',
   css_syntax: 'CSS could not be safely parsed',
   css_capability: 'active or indirect CSS resource capabilities are forbidden',
+  active_script: 'script elements and event handlers are forbidden in static prototypes',
   script_capability: 'script network, navigation, storage or dynamic execution is forbidden',
 } as const
 export type HtmlViolation = keyof typeof htmlViolationDescriptions
@@ -48,18 +50,20 @@ function cssViolation(css: string, context: 'stylesheet' | 'declarationList'): H
   return violation
 }
 
-export function inspectRequirementHtml(html: string): { violation?: HtmlViolation; mappings: string[] } {
+export function inspectRequirementHtml(html: string, mode: 'legacy' | 'static-script-disabled' = 'legacy'): { violation?: HtmlViolation; mappings: string[] } {
   const mappings: string[] = []
-  const pending: { node: DefaultTreeAdapterTypes.Node; template: boolean }[] = [{ node: parseHtml(html), template: false }]
+  const pending: { node: DefaultTreeAdapterTypes.Node; template: boolean }[] = [{ node: parseHtml(html, { scriptingEnabled: mode !== 'static-script-disabled' }), template: false }]
   while (pending.length) {
     const { node, template } = pending.pop()!
     if ('tagName' in node) {
       const tag = node.tagName.toLowerCase()
       const reject = (violation: HtmlViolation) => ({ violation, mappings })
+      if (mode === 'static-script-disabled' && tag === 'script') return reject('active_script')
       if (['iframe', 'object', 'embed', 'base', 'link', 'foreignobject', 'animate', 'animatemotion', 'animatetransform', 'set'].includes(tag)) return reject('embedded_document')
       for (const attribute of node.attrs) {
         const name = attribute.name.toLowerCase()
         const value = attribute.value.trim()
+        if (mode === 'static-script-disabled' && name.startsWith('on')) return reject('active_script')
         if (name === 'src' && !(tag === 'img' && raster.test(value))) return reject('resource_attribute')
         if (['srcset', 'imagesrcset', 'srcdoc', 'poster', 'background', 'ping', 'manifest', 'codebase', 'archive'].includes(name)) return reject('resource_attribute')
         if (['href', 'action', 'formaction'].includes(name) && value && !fragment.test(value)) return reject('navigation_attribute')
@@ -73,7 +77,9 @@ export function inspectRequirementHtml(html: string): { violation?: HtmlViolatio
           if (violation) return reject(violation)
         }
         if (name.startsWith('on') && scriptCapability.test(value)) return reject('script_capability')
-        if (name === 'data-requirement-id' && !template && !['template', 'script', 'style'].includes(tag)) mappings.push(value)
+        if ((name === 'data-requirement-id' || name === 'data-requirement-ids') && !template && !['template', 'script', 'style'].includes(tag)) {
+          for (const id of value.split(/\s+/).filter(Boolean)) mappings.push(id)
+        }
       }
       const content = node.childNodes.filter(child => child.nodeName === '#text').map(child => (child as DefaultTreeAdapterTypes.TextNode).value).join('')
       if (tag === 'style') {

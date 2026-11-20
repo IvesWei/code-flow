@@ -62,15 +62,21 @@ export async function createRequirementWorkspace(root: string, snapshots: Worksp
     accessed.add(path)
     return (await readFile(join(root, path), 'utf8')).split('\n')
   }
+  const allowedArguments = {
+    workspace_list: ['offset'], workspace_search: ['path', 'query', 'offset'],
+    workspace_read: ['path', 'startLine', 'count', 'characterOffset'], workspace_write_notes: ['path', 'text'],
+  }
+  const properties = {
+    path: { type: 'string' }, query: { type: 'string' }, text: { type: 'string' }, offset: { type: 'integer', minimum: 0 },
+    startLine: { type: 'integer', minimum: 1 }, count: { type: 'integer', minimum: 1, maximum: 200 }, characterOffset: { type: 'integer', minimum: 0 },
+  }
   const tools = names.map(name => defineTool(name, {
     description: name === 'workspace_list' ? 'List registered snapshot and note files, with source IDs and pagination.'
       : name === 'workspace_search' ? 'Literal case-insensitive search in supplied snapshot text. Returns matching snapshot line numbers; use workspace_read for context. Embedded code line numbers remain the original code anchors.'
         : name === 'workspace_read' ? 'Read at most 200 lines of a registered workspace file. Use count=1 and characterOffset to continue a long line at its nextCharacterOffset. Snapshot line numbers differ from original numbered code lines inside it. Response pagination and truncation are explicit.'
           : 'Create or replace a Markdown working note under notes/. Supplied snapshots cannot be changed. Notes are temporary, not delivered artifacts.',
-    parameters: { type: 'object', properties: {
-      path: { type: 'string' }, query: { type: 'string' }, text: { type: 'string' }, offset: { type: 'integer', minimum: 0 },
-      startLine: { type: 'integer', minimum: 1 }, count: { type: 'integer', minimum: 1, maximum: 200 }, characterOffset: { type: 'integer', minimum: 0 },
-    }, required: name === 'workspace_list' ? [] : name === 'workspace_search' ? ['query'] : name === 'workspace_read' ? ['path'] : ['path', 'text'], additionalProperties: false },
+    parameters: { type: 'object', properties: Object.fromEntries(allowedArguments[name].map(key => [key, properties[key as keyof typeof properties]])),
+      required: name === 'workspace_list' ? [] : name === 'workspace_search' ? ['query'] : name === 'workspace_read' ? ['path'] : ['path', 'text'], additionalProperties: false },
     skipPermission: true,
     defer: 'never',
     handler: async (value, invocation) => serialize(async () => {
@@ -80,7 +86,7 @@ export async function createRequirementWorkspace(root: string, snapshots: Worksp
       let result: unknown
       try {
         const args = object(value)
-        const allowed = name === 'workspace_list' ? ['offset'] : name === 'workspace_search' ? ['path', 'query', 'offset'] : name === 'workspace_read' ? ['path', 'startLine', 'count', 'characterOffset'] : ['path', 'text']
+        const allowed = allowedArguments[name]
         if (Object.keys(args).some(key => !allowed.includes(key))) throw new Error('Unexpected workspace argument')
         if (name === 'workspace_list') {
           const offset = integer(args.offset, 0, 0, files.size)

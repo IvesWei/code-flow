@@ -110,7 +110,9 @@ export const runRemoteGit: RemoteGitRunner = (args, options) => new Promise((res
       if (failure) { reject(failure); return }
       if (code === 0) { resolve(Buffer.concat(stdout)); return }
       const diagnostic = Buffer.concat(stderr).toString('utf8')
-      const message = /Authentication failed|could not read Username|could not read Password|unable to get password|401|403/i.test(diagnostic)
+      const message = /requested URL returned error:\s*30[12378]\b|redirect(?:ion)? (?:is |not |disabled|forbidden)|unable to update url base from redirection/i.test(diagnostic)
+        ? '仓库地址发生重定向，快照读取不自动跟随跳转；请使用仓库页面提供的 HTTPS 克隆地址（通常以 .git 结尾）'
+        : /Authentication failed|could not read Username|could not read Password|unable to get password|401|403/i.test(diagnostic)
         ? '仓库认证失败，请检查 API 服务运行账户的本机 Git 凭据和仓库权限'
         : /Remote branch .* not found|couldn.t find remote ref/i.test(diagnostic)
           ? '远程分支不存在，请检查分支名称'
@@ -251,7 +253,10 @@ export async function loadRemoteCode(input: RemoteCodeInput, signal?: AbortSigna
     const commit = decode(await execute(['rev-parse', '--verify', 'HEAD^{commit}'], repositoryDirectory, 256)).trim()
     if (!objectId.test(commit)) unsafe()
     const { eligible, excluded } = parseTree(await execute(['ls-tree', '-r', '-z', '-l', '--full-tree', commit, ...(normalized.directory ? ['--', `${normalized.directory}/`] : [])], repositoryDirectory, treeBytes), normalized.directory)
-    if (!eligible.length) throw new RemoteCodeError('\u6307\u5b9a\u8303\u56f4\u5185\u6ca1\u6709\u53ef\u8bfb\u53d6\u7684\u4ee3\u7801\u6587\u4ef6')
+    if (!eligible.length) {
+      if (!excluded) throw new RemoteCodeError(normalized.directory ? '所选分支的模块目录没有文件，请核对仓库相对路径及大小写，或留空检查仓库根目录' : '所选分支的提交没有文件，请确认仓库和分支是否正确')
+      throw new RemoteCodeError(`所选范围的 ${excluded} 个 Git 条目均不符合快照规则。请选择包含受支持源码的目录；依赖、构建产物、敏感路径、链接和子模块不纳入快照`)
+    }
     const files: RemoteCodeResult['files'] = []
     const excludedFiles: string[] = []
     for (const blob of eligible) {

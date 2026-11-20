@@ -99,6 +99,15 @@ test('remote load preserves branch/directory/commit evidence with bounded and is
   await assertCleaned(mock.calls)
 })
 
+test('empty scope and filtered scope give distinct diagnostics before reading blobs', async () => {
+  for (const [entries, diagnostic] of [['', /模块目录没有文件/], [tree('src/image.png') + tree('src/link.ts', source, '120000'), /2 个 Git 条目均不符合/]] as const) {
+    const mock = mockGit({ tree: entries })
+    await assert.rejects(loadRemoteCode({ repository, directory: 'src' }, undefined, mock), diagnostic)
+    assert.deepEqual(mock.calls.map(call => call.command), ['clone', 'rev-parse', 'ls-tree'])
+    await assertCleaned(mock.calls)
+  }
+})
+
 test('remote runner environment excludes tokens, proxy and Git overrides while allowing local credential configuration', async () => {
   const keys = ['GIT_CONFIG', 'GIT_CONFIG_COUNT', 'GIT_CONFIG_PARAMETERS', 'GIT_CONFIG_KEY_0', 'GIT_CONFIG_VALUE_0', 'GIT_EXEC_PATH', 'GIT_SSH_COMMAND', 'GIT_ASKPASS', 'SSH_ASKPASS', 'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY', 'https_proxy', 'GITHUB_TOKEN', 'GH_TOKEN', 'NODE_OPTIONS', 'LD_PRELOAD', 'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_TEMPLATE_DIR', 'GIT_SSL_NO_VERIFY']
   const previous = new Map(keys.map(key => [key, process.env[key]]))
@@ -184,7 +193,7 @@ test('tree metadata, scope and commit must be valid; no eligible blob is silentl
 })
 
 test('blob size, strict UTF-8, duplicate names, control characters and credentials fail closed', async () => {
-  const contents = [Buffer.from([0xc3, 0x28]), Buffer.from([0]), Buffer.from('const apiKey = "PRIVATE_SENTINEL"'), Buffer.from('-----BEGIN PRIVATE KEY-----\nPRIVATE_SENTINEL'), Buffer.alloc(codeSnapshotLimits.fileBytes + 1, 'a')]
+  const contents = [Buffer.from([0xc3, 0x28]), Buffer.from([0]), Buffer.from(`const apiKey = "ghp_${'x'.repeat(36)}"`), Buffer.from('-----BEGIN PRIVATE KEY-----\nPRIVATE_SENTINEL'), Buffer.alloc(codeSnapshotLimits.fileBytes + 1, 'a')]
   for (const blob of contents) {
     const mock = mockGit({ tree: tree('src/main.ts', blob.length > codeSnapshotLimits.fileBytes ? source : blob), blob })
     await assertSanitized(() => loadRemoteCode({ repository }, undefined, mock))
@@ -198,7 +207,7 @@ test('blob size, strict UTF-8, duplicate names, control characters and credentia
 })
 
 test('remote content safety exclusions preserve remaining files and disclose excluded paths without retaining unsafe content', async () => {
-  const bad = Buffer.from('const apiKey = "PRIVATE_SENTINEL"')
+  const bad = Buffer.from('-----BEGIN PRIVATE KEY-----\nPRIVATE_SENTINEL')
   const goodId = 'c'.repeat(40)
   const mock = mockGit({ tree: tree('src/private.ts', bad) + tree('src/safe.ts', source, '100644', 'blob', goodId) })
   const runner: RemoteGitRunner = (args, options) => args.includes('cat-file') && args.at(-1) === blobId ? Promise.resolve(bad) : mock.runner(args, options)
@@ -207,6 +216,16 @@ test('remote content safety exclusions preserve remaining files and disclose exc
   assert.deepEqual(result.excludedFiles, ['src/private.ts'])
   assert.equal(result.excluded, 1)
   assert.doesNotMatch(JSON.stringify(result), /PRIVATE_SENTINEL/)
+  await assertCleaned(mock.calls)
+})
+
+test('remote snapshots retain component variables and ordinary authorization metadata without safety exclusions', async () => {
+  const component = Buffer.from('<template><label>Approver</label><token>{{ currentToken }}</token></template>\n<script>const fields = { token: currentToken, password: passwordValue, authorization: "only-view" };</script>')
+  const mock = mockGit({ tree: tree('src/DevConfirmItem.vue', component), blob: component })
+  const result = await loadRemoteCode({ repository }, undefined, mock)
+  assert.deepEqual(result.files, [{ path: 'src/DevConfirmItem.vue', content: component.toString('utf8') }])
+  assert.equal(result.excluded, 0)
+  assert.equal(result.excludedFiles, undefined)
   await assertCleaned(mock.calls)
 })
 
@@ -281,6 +300,14 @@ test('real Git errors classify authentication failures without exposing stderr a
       assert.doesNotMatch((error as Error).message, /PRIVATE_SENTINEL|stderr/)
       return true
     })
+    for (const diagnostic of ['fatal: unable to access PRIVATE_SENTINEL: The requested URL returned error: 302', 'fatal: unable to update url base from redirection PRIVATE_SENTINEL']) {
+      await writeFile(script, `process.stderr.write(${JSON.stringify(diagnostic)}); process.exitCode = 1`)
+      await assert.rejects(runRemoteGit(args, options), error => {
+        assert.match((error as Error).message, /仓库地址发生重定向/)
+        assert.doesNotMatch((error as Error).message, /PRIVATE_SENTINEL|stderr/)
+        return true
+      })
+    }
     await writeFile(script, 'process.stdout.write("x".repeat(4096)); setInterval(() => {}, 1000)')
     await assert.rejects(runRemoteGit(args, options), /输出超出限制/)
   } finally { await rm(temporary, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }) }

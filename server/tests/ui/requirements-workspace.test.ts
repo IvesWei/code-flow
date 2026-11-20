@@ -9,6 +9,9 @@ import { chromium } from 'playwright-core'
 import { expect } from '@playwright/test'
 import { executionEnvironment } from '../../execution/execution-environment.js'
 import type { RequirementProject, StructuredPrd } from '../../../shared/requirements.js'
+import { requirementPrdClarification } from '../../../shared/requirement-progress.js'
+import { dualPrdFixture } from '../fixtures/dual-prd.js'
+import { zipSync, strToU8 } from 'fflate'
 
 const at = '2026-10-29T10:00:00.000Z'
 const projectId = '11111111-1111-4111-8111-111111111111'
@@ -28,6 +31,354 @@ const screens = [
   { id: 'screen1', title: '订单保存页面最长中文标签用于验证窄屏展开菜单边界', state: '默认', requirementIds: ['REQ1'], acceptanceIds: ['AC1'], html: '<meta http-equiv="refresh" content="0;url=https://forbidden.invalid"><base href="https://forbidden.invalid"><style>@import "https://forbidden.invalid/import";body{background-image:url(https://forbidden.invalid/css)}</style><button data-requirement-id="REQ1">保存订单</button><a href="https://forbidden.invalid/link">外部链接</a><img src="https://forbidden.invalid/tracker"><input type="file"><input type="password">' },
   { id: 'screen2', title: '检索订单', state: '结果', requirementIds: ['REQ2'], acceptanceIds: ['AC2'], html: '<button data-requirement-id="REQ2">检索订单</button>' },
 ]
+
+test('capture entry settings retain query context, save by keyboard and fit four widths with explicit errors', { timeout: 120000 }, async () => {
+  const temporary = mkdtempSync(join(tmpdir(), 'requirements-capture-entries-ui-'))
+  const server = await createServer({ configFile: false, envDir: false, cacheDir: join(temporary, '.vite'), plugins: [react()], server: { host: '127.0.0.1', port: 0, watch: null } })
+  let browser: Awaited<ReturnType<typeof chromium.launch>> | undefined
+  const project: RequirementProject = { schemaVersion: 1, id: projectId, ownerId: 7, version: 1, title: '隔离取证入口', description: '页面依赖项目上下文', modelId: 'auto', createdAt: at, updatedAt: at, status: 'draft', preview: { origin: 'https://tmp.test.sunmi.com', generation: 1 }, sources: [], evidence: [], questions: [], decisions: [], jobs: [], events: [], revisions: [] }
+  const submissions: { origin: string; entryPaths: string[] }[] = []
+  try {
+    await server.listen()
+    const address = server.httpServer?.address()
+    assert.ok(address && typeof address !== 'string')
+    browser = await chromium.launch({ channel: 'chrome', headless: true, env: executionEnvironment() })
+    const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } })
+    const errors: string[] = []
+    page.on('pageerror', error => errors.push(error.message))
+    await page.route('**/api/**', async route => {
+      const request = route.request(), path = new URL(request.url()).pathname
+      if (path === '/api/auth/status') return route.fulfill({ json: { configured: true, authenticated: true, login: 'fixture', userId: 7 } })
+      if (path === '/api/copilot/models' || path === '/api/models') return route.fulfill({ json: { defaultModelId: 'auto', models: [{ id: 'auto', name: 'Auto', vision: true }] } })
+      if (path === '/api/tasks') return route.fulfill({ json: { items: [], busy: false } })
+      if (request.method() === 'GET' && path === root) return route.fulfill({ json: [project] })
+      if (request.method() === 'GET' && path === `${root}/${projectId}`) return route.fulfill({ json: project })
+      if (request.method() === 'PATCH' && path === `${root}/${projectId}/preview`) {
+        const body = request.postDataJSON() as { origin: string; entryPaths: string[] }
+        submissions.push(body)
+        if (body.entryPaths.some(path => path.includes('evil.invalid'))) return route.fulfill({ status: 400, json: { error: '完整业务入口需属于现有系统地址' } })
+        project.preview = { origin: body.origin, generation: project.preview!.generation + 1, entryPaths: body.entryPaths.map(path => path.startsWith('/') ? path : new URL(path).pathname + new URL(path).search) }
+        project.version++
+        return route.fulfill({ json: project })
+      }
+      errors.push(`${request.method()} ${path}`)
+      return route.fulfill({ status: 400, json: { error: 'Unexpected fixture endpoint' } })
+    })
+    await page.goto(`http://127.0.0.1:${address.port}/requirements/${projectId}`, { waitUntil: 'networkidle' })
+    const entries = page.getByRole('textbox', { name: '完整业务入口（可选，每行一个）', exact: true })
+    await entries.fill('https://tmp.test.sunmi.com/plans?projectId=42\n/plans/detail?projectId=42&testPlanId=7')
+    await page.getByRole('button', { name: '保存取证地址', exact: true }).focus()
+    await page.keyboard.press('Enter')
+    await expect.poll(() => project.preview!.generation).toBe(2)
+    assert.deepEqual(submissions[0].entryPaths, ['https://tmp.test.sunmi.com/plans?projectId=42', '/plans/detail?projectId=42&testPlanId=7'])
+    await expect(entries).toHaveValue('/plans?projectId=42\n/plans/detail?projectId=42&testPlanId=7')
+    for (const width of [1440, 1367, 390, 320]) {
+      await page.setViewportSize({ width, height: 1000 })
+      await entries.focus()
+      assert.equal(await entries.evaluate(element => element.matches(':focus-visible')), true)
+      const box = await entries.boundingBox()
+      assert.ok(box && box.x >= 0 && box.x + box.width <= width + 1)
+      assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true)
+      await page.screenshot({ path: join(temporary, `capture-entry-${width}.png`), fullPage: true })
+    }
+    await entries.fill('https://evil.invalid/plans?projectId=42')
+    await page.getByRole('button', { name: '保存取证地址', exact: true }).click()
+    await expect(page.getByRole('region', { name: '现有系统取证', exact: true }).getByRole('alert')).toContainText('完整业务入口需属于现有系统地址')
+    await expect(entries).toHaveValue('https://evil.invalid/plans?projectId=42')
+    assert.equal(project.preview!.generation, 2)
+    assert.deepEqual(errors, [])
+  } finally { await browser?.close(); await server.close(); rmSync(temporary, { recursive: true, force: true }) }
+})
+
+test('dual PRD editions switch with pointer and keyboard, preserve mappings, fit six widths and download both Word files', { timeout: 120000 }, async () => {
+  const temporary = mkdtempSync(join(tmpdir(), 'requirements-dual-prd-ui-'))
+  const server = await createServer({ configFile: false, envDir: false, cacheDir: join(temporary, '.vite'), plugins: [react()], server: { host: '127.0.0.1', port: 0, watch: null } })
+  let browser: Awaited<ReturnType<typeof chromium.launch>> | undefined
+  try {
+    await server.listen()
+    const address = server.httpServer?.address()
+    assert.ok(address && typeof address !== 'string')
+    const origin = `http://127.0.0.1:${address.port}`
+    browser = await chromium.launch({ channel: 'chrome', headless: true, env: executionEnvironment() })
+    const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } })
+    const dual = dualPrdFixture(prd)
+    dual.requirements[0].title += '（包含多个约束的较长中文功能标题，用于验证多行排版与编号不会发生重叠）'
+    const revision = { id: 'dual-revision', createdAt: at, confirmedAt: at, prd: dual, screens: structuredClone(screens), screenshots: screens.map(screen => ({ screenId: screen.id, storageKey: `${screen.id}.png`, sha256: 'fixture' })) }
+    const project: RequirementProject = { schemaVersion: 1, id: projectId, ownerId: 7, version: 1, title: '隔离双模板 PRD', description: '订单需求', modelId: 'auto', createdAt: at, updatedAt: at, status: 'design_review', sources: [{ id: 'S1', name: 'source.md', kind: 'file', sha256: 'fixture', sizeBytes: 12 }], evidence: [], questions: [], decisions: [], jobs: [{ id: 'analysis', stage: 'analyze', status: 'succeeded', startedAt: at }], events: [{ id: 'analysis', at, text: 'analysis:analysis' }, { id: 'prd', at, text: `prd:${revision.id}` }], revisions: [revision] }
+    const review: NonNullable<RequirementProject['revisions'][number]['businessReview']> = { revisionId: revision.id, changes: [
+      { requirementId: 'REQ1', kind: '新增', scope: 'ui', text: '提交后显示订单号', basis: '返回订单号', screenIds: ['screen1'] },
+      { requirementId: 'REQ1', kind: '删除', scope: 'logic', text: '取消重复记录写入', basis: '保存后可查询', screenIds: [] },
+      { requirementId: 'REQ2', kind: '变更', scope: 'ui', text: '修改条件后只显示匹配订单', basis: '展示匹配结果', screenIds: ['screen2'] },
+    ], pending: [{ requirementId: 'REQ2', text: '历史订单的适用范围尚待确认' }] }
+    const artwork = await browser.newPage({ viewport: { width: 1600, height: 1000 } })
+    await artwork.setContent('<html lang="zh"><style>body{margin:0;font:22px sans-serif;color:#203a32;background:#f4f7f6}header{padding:24px 48px;background:#1f463a;color:white}main{margin:48px}section{padding:32px;background:white;border:1px solid #ccd7d3}p{padding:16px;border-bottom:1px solid #e2e8e4}</style><header>订单管理</header><main><h1>订单详情</h1><section><h2>提交结果</h2><p>订单号　 SO-2026-001</p><p>订单状态　 已提交</p></section></main></html>')
+    const savedOrder = await artwork.screenshot()
+    await artwork.locator('h1').evaluate(node => { node.textContent = '检索订单' }); await artwork.locator('h2').evaluate(node => { node.textContent = '匹配结果' })
+    const matchingOrders = await artwork.screenshot(); await artwork.close()
+    let submissions = 0
+    let failImages = false
+    const exports: string[] = [], violations: string[] = [], errors: string[] = []
+    page.on('pageerror', error => errors.push(error.message))
+    await page.route('**/api/**', async route => {
+      const request = route.request(), url = new URL(request.url()), path = url.pathname
+      const reply = (json: unknown, status = 200) => route.fulfill({ json, status })
+      if (path === '/api/auth/status') return reply({ configured: true, authenticated: true, login: 'fixture', userId: 7 })
+      if (path === '/api/copilot/models' || path === '/api/models') return reply({ defaultModelId: 'auto', models: [{ id: 'auto', name: 'Auto', vision: true }] })
+      if (path === '/api/tasks') return reply({ items: [], busy: false })
+      if (request.method() === 'GET' && path === root) return reply([project])
+      if (request.method() === 'GET' && path === `${root}/${projectId}`) {
+        if (project.jobs.at(-1)?.status === 'running') { project.jobs.at(-1)!.status = 'succeeded'; project.revisions[0].businessReview = review; project.version++ }
+        return reply(project)
+      }
+      if (request.method() === 'POST' && path === `${root}/${projectId}/jobs`) {
+        assert.deepEqual(request.postDataJSON(), { stage: 'business-review', revisionId: revision.id, version: project.version })
+        submissions++; project.jobs.push({ id: 'review', stage: 'business-review', revisionId: revision.id, status: 'running', startedAt: at }); project.version++
+        return reply(project)
+      }
+      if (path.includes('/screenshots/')) return failImages ? route.fulfill({ status: 503, body: 'Isolated screenshot failure' }) : route.fulfill({ contentType: 'image/png', body: path.endsWith('screen2') ? matchingOrders : savedOrder })
+      if (path.endsWith('/exports')) {
+        assert.equal(url.searchParams.get('scope'), 'prd')
+        assert.equal(url.searchParams.get('format'), 'zip')
+        assert.equal(url.searchParams.get('revision'), revision.id)
+        exports.push(url.search)
+        return route.fulfill({ contentType: 'application/zip', body: Buffer.from(zipSync({ '业务评审版.docx': strToU8('Isolated business Word'), '开发规格版.docx': strToU8('Isolated development Word') })) })
+      }
+      violations.push(`${request.method()} ${path}`)
+      return reply({ error: 'Unexpected endpoint' }, 404)
+    })
+    await page.goto(`${origin}/requirements/${projectId}`, { waitUntil: 'networkidle' })
+    await expect(page.getByText('本修订尚未整理业务变更清单。')).toBeVisible()
+    assert.equal(submissions, 0)
+    await page.getByRole('button', { name: '整理业务变更', exact: true }).click()
+    await expect(page.locator('.business-note-text').first()).toHaveText('提交后显示订单号', { timeout: 10000 })
+    assert.equal(submissions, 1)
+    for (const width of [1440, 1367, 1024, 768, 390, 320]) {
+      await page.setViewportSize({ width, height: 1000 })
+      await page.goto(`${origin}/requirements/${projectId}`, { waitUntil: 'networkidle' })
+      const mobilePrd = page.getByRole('button', { name: 'PRD', exact: true })
+      if (await mobilePrd.isVisible()) await mobilePrd.click()
+      const pane = page.locator('.requirements-prd-pane')
+      const business = pane.getByRole('radio', { name: '业务评审版', exact: true })
+      const development = pane.getByRole('radio', { name: '开发规格版', exact: true })
+      await expect(business).toBeChecked()
+      await expect(pane).not.toContainText('验收标准：')
+      await expect(pane).not.toContainText('FR-01')
+      await expect(page.getByRole('link', { name: 'DOCX', exact: true })).toHaveCount(0)
+      const target = pane.locator('[data-prd-requirement="REQ2"]')
+      const change = target.getByRole('button', { name: /修改条件后只显示匹配订单/ })
+      await change.click()
+      await expect(change).toHaveAttribute('aria-pressed', 'true')
+      await development.click()
+      await expect(development).toBeChecked()
+      await expect(development).toBeFocused()
+      await expect(target).toContainText('FR-02')
+      await expect(target).toContainText('验收标准：')
+      const anchorOffset = await target.evaluate(element => element.getBoundingClientRect().top - element.closest('.requirements-prd-pane')!.getBoundingClientRect().top)
+      assert.ok(Math.abs(anchorOffset - 16) < 3, `${width}: switching lost function anchor ${anchorOffset}`)
+      await development.press('ArrowLeft')
+      await expect(business).toBeChecked()
+      await expect(business).toBeFocused()
+      await expect(pane).not.toContainText('验收标准：')
+      await business.press('ArrowRight')
+      await expect(development).toBeChecked()
+      await expect(development).toBeFocused()
+      await pane.evaluate(element => { element.scrollTop = 0 })
+      const bounds = await pane.getByRole('group', { name: 'PRD 版本' }).boundingBox()
+      assert.ok(bounds && bounds.x >= 0 && bounds.x + bounds.width <= width + 1, `${width}: edition controls overflow`)
+      const overflow = await page.evaluate(() => document.documentElement.scrollWidth > innerWidth + 1)
+      assert.equal(overflow, false, `${width}: horizontal overflow`)
+      await page.screenshot({ path: join(temporary, `dual-prd-development-${width}.png`), fullPage: true })
+      const download = page.waitForEvent('download')
+      await page.getByRole('button', { name: '导出 PRD', exact: true }).click()
+      assert.equal((await download).suggestedFilename(), `prd-${projectId}-${revision.id}.zip`)
+      await expect(page.getByRole('status').filter({ hasText: '业务评审版和开发规格版' })).toBeVisible()
+      await business.click()
+      const trigger = page.getByRole('button', { name: '宽屏评审', exact: true })
+      await trigger.click()
+      const dialog = page.locator('dialog[data-business-focus]:modal'), left = dialog.getByRole('region', { name: '设计评审' }), right = dialog.getByRole('region', { name: 'PRD 评审' })
+      await expect(dialog.getByRole('heading', { name: '审阅模式' })).toHaveCount(0)
+      await expect(dialog.getByRole('slider')).toHaveCount(0)
+      await expect(dialog.getByRole('group', { name: 'PRD 版本' })).toHaveCount(0)
+      await expect(dialog.getByRole('button', { name: '导出 PRD' })).toHaveCount(0)
+      assert.equal(await dialog.evaluate(element => getComputedStyle(element, '::backdrop').backdropFilter.includes('blur(')), true)
+      const viewport = await dialog.boundingBox(); assert.ok(viewport && viewport.x === 0 && viewport.y === 0 && viewport.width === width && viewport.height === 1000)
+      if (width > 760) {
+        const designBox = await left.boundingBox(), noteBox = await right.boundingBox()
+        assert.ok(designBox && noteBox && designBox.x + designBox.width <= noteBox.x + 1 && designBox.width > noteBox.width, `${width}: design must be on the left`)
+        assert.equal(await right.evaluate(element => getComputedStyle(element).borderLeftStyle), 'dashed')
+      }
+      for (const [kind, color] of [['新增', 'rgb(20, 99, 63)'], ['变更', 'rgb(129, 77, 6)'], ['删除', 'rgb(166, 50, 72)']]) await expect(right.locator(`[data-kind="${kind}"] .business-note-text`)).toHaveCSS('color', color)
+      await right.getByRole('button', { name: /取消重复记录写入/ }).click()
+      if (width <= 760) await dialog.getByRole('radio', { name: '设计', exact: true }).check()
+      await expect(left).toContainText('仅调整后台逻辑，无界面设计稿')
+      await expect(left.locator('img')).toHaveCount(0)
+      if (width <= 760) await dialog.getByRole('radio', { name: 'PRD', exact: true }).check()
+      const directory = right.getByLabel('业务评审目录', { exact: true }); await directory.click()
+      const menu = right.getByRole('navigation', { name: '业务变更目录' }), menuBox = await menu.boundingBox(), container = await right.boundingBox()
+      assert.ok(menuBox && container && menuBox.x >= container.x && menuBox.x + menuBox.width <= Math.min(width, container.x + container.width) + 1)
+      await page.screenshot({ path: join(temporary, `business-directory-${width}.png`) })
+      await menu.getByRole('button', { name: '检索订单' }).click()
+      await right.getByRole('button', { name: /修改条件后只显示匹配订单/ }).focus(); await page.keyboard.press('Enter')
+      assert.equal(await right.evaluate(element => element.scrollWidth <= element.clientWidth + 1), true)
+      await page.screenshot({ path: join(temporary, `business-notes-${width}.png`) })
+      if (width <= 760) await dialog.getByRole('radio', { name: '设计', exact: true }).check()
+      const image = left.locator('img'); await expect(image).toHaveAttribute('src', /screenshots\/screen2\?revision=dual-revision/)
+      await expect.poll(() => image.evaluate(node => (node as HTMLImageElement).naturalWidth)).toBe(1600)
+      await page.screenshot({ path: join(temporary, `business-design-${width}.png`) })
+      if (width === 1440) await dialog.getByRole('button', { name: '关闭宽屏评审' }).click(); else await page.keyboard.press('Escape')
+      await expect(trigger).toBeFocused()
+    }
+    assert.equal(exports.length, 6)
+    await page.setViewportSize({ width: 1440, height: 1000 })
+    await page.getByRole('radio', { name: '开发规格版' }).click()
+    await page.getByRole('button', { name: '宽屏评审', exact: true }).click()
+    const modal = page.getByRole('dialog', { name: '审阅模式', exact: true })
+    await expect(modal.locator('.requirements-prd-pane')).toContainText('验收标准：')
+    await modal.getByRole('radio', { name: '业务评审版' }).click()
+    await expect(modal.locator('.requirements-prd-pane')).not.toContainText('验收标准：')
+    await page.keyboard.press('Escape')
+    delete project.revisions[0].confirmedAt
+    project.status = 'prd_review'
+    project.version++
+    await page.reload({ waitUntil: 'networkidle' })
+    await page.getByRole('button', { name: '编辑 JSON', exact: true }).click()
+    await page.getByRole('textbox', { name: 'PRD JSON' }).fill(JSON.stringify(prd))
+    await page.getByRole('button', { name: '保存 PRD', exact: true }).click()
+    await expect(page.getByRole('alert')).toContainText('不能移除 templateVersion')
+    await page.getByRole('button', { name: '放弃编辑', exact: true }).click()
+    failImages = true
+    await page.reload({ waitUntil: 'networkidle' })
+    await expect(page.getByRole('alert').filter({ hasText: '设计稿截图加载失败' }).first()).toBeVisible()
+    assert.deepEqual(violations, [])
+    assert.deepEqual(errors, [])
+  } finally { await browser?.close(); await server.close(); if (process.env.KEEP_UI_SCREENSHOTS) console.log(temporary); else rmSync(temporary, { recursive: true, force: true }) }
+})
+
+test('prototype adjustment shows asynchronous receipts, polling errors, progress and persistent terminal states inside its modal', { timeout: 120000 }, async () => {
+  const temporary = mkdtempSync(join(tmpdir(), 'requirements-adjustment-feedback-'))
+  const server = await createServer({ configFile: false, envDir: false, cacheDir: join(temporary, '.vite'), plugins: [react()], server: { host: '127.0.0.1', port: 0, watch: null } })
+  let browser: Awaited<ReturnType<typeof chromium.launch>> | undefined
+  let releaseSubmission!: () => void
+  const submissionGate = new Promise<void>(resolve => { releaseSubmission = resolve })
+  try {
+    await server.listen()
+    const address = server.httpServer?.address()
+    assert.ok(address && typeof address !== 'string')
+    const origin = `http://127.0.0.1:${address.port}`
+    browser = await chromium.launch({ channel: 'chrome', headless: true, env: executionEnvironment() })
+    const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } })
+    const project: RequirementProject = {
+      schemaVersion: 1, id: projectId, ownerId: 7, version: 1, title: '隔离异步原型任务', description: '订单需求', modelId: 'auto', createdAt: at, updatedAt: at, status: 'design_review',
+      sources: [{ id: 'S1', name: 'source.md', kind: 'file', sha256: 'fixture', sizeBytes: 12 }], evidence: [], questions: [], decisions: [],
+      jobs: [{ id: 'analysis', stage: 'analyze', status: 'succeeded', startedAt: at }],
+      events: [{ id: 'analysis', at, text: 'analysis:analysis' }, { id: 'prd', at, text: 'prd:original' }],
+      revisions: [{ id: 'original', createdAt: at, confirmedAt: at, prd: structuredClone(prd), screens: screens.map(screen => ({ ...screen, html: `<main data-requirement-id="${screen.requirementIds[0]}">Original preview</main>` })) }],
+    }
+    const submissions: Record<string, unknown>[] = []
+    let rejectReads = false
+    const violations: string[] = []
+    await page.route('**/api/**', async route => {
+      const request = route.request(), path = new URL(request.url()).pathname
+      const reply = (json: unknown, status = 200) => route.fulfill({ json, status })
+      if (path === '/api/auth/status') return reply({ configured: true, authenticated: true, login: 'fixture', userId: 7 })
+      if (path === '/api/copilot/models' || path === '/api/models') return reply({ defaultModelId: 'auto', models: [{ id: 'auto', name: 'Auto', vision: true }] })
+      if (path === '/api/tasks') return reply({ items: [], busy: false })
+      if (path === root && request.method() === 'GET') return reply([project])
+      if (path === `${root}/${projectId}` && request.method() === 'GET') return rejectReads ? reply({ error: 'Fixture polling unavailable' }, 503) : reply(project)
+      if (request.method() === 'POST' && (path === `${root}/${projectId}/jobs` || path.endsWith('/cancel'))) {
+        const body = request.postDataJSON() as Record<string, unknown>
+        assert.equal(body.version, project.version)
+        if (path.endsWith('/cancel')) {
+          project.jobs.at(-1)!.status = 'cancelled'
+          project.jobs.at(-1)!.endedAt = new Date().toISOString()
+          project.status = 'cancelled'
+        } else {
+          submissions.push(body)
+          await submissionGate
+          const startedAt = new Date().toISOString()
+          project.jobs.push({ id: `async-adjustment-${submissions.length}`, stage: 'design', status: 'running', startedAt })
+          project.status = 'running'
+          project.events.push({ id: `accepted-${submissions.length}`, at: startedAt, text: '原型 UI 调整：SDK 已接收请求，等待模型响应' })
+        }
+        project.version++
+        return reply(project, path.endsWith('/cancel') ? 200 : 202)
+      }
+      violations.push(`${request.method()} ${path}`)
+      return reply({ error: 'Unexpected endpoint' }, 404)
+    })
+    await page.goto(`${origin}/requirements/${projectId}`, { waitUntil: 'networkidle' })
+    await page.getByRole('button', { name: '调整原型', exact: true }).click()
+    const modal = page.getByRole('dialog', { name: '原型调整', exact: true })
+    const status = modal.getByRole('region', { name: '设计任务执行状态' })
+    const instruction = '请调整字段布局，保留已经确认的需求和全部状态。'.repeat(100)
+    await modal.getByRole('textbox', { name: '原型修改意见' }).fill(instruction)
+    await modal.getByRole('button', { name: '发送并调整原型', exact: true }).click()
+    await expect.poll(() => submissions.length).toBe(1)
+    await expect(status).toContainText('正在提交调整请求')
+    await expect(modal.getByRole('button', { name: '正在提交…', exact: true })).toBeDisabled()
+    rejectReads = true
+    releaseSubmission()
+    await expect(status).toContainText('任务已接收')
+    await expect(status).toContainText('async-adjustment-1')
+    await expect(status.getByRole('progressbar', { name: '设计任务进度' })).toBeVisible()
+    await expect(modal.getByRole('alert')).toContainText('Fixture polling unavailable', { timeout: 10000 })
+    await expect(modal.getByRole('alert')).toContainText('后台任务可能仍在执行')
+    assert.equal(submissions.length, 1)
+    assert.equal(submissions[0].instruction, instruction)
+    rejectReads = false
+    project.events.push({ id: 'retry', at: new Date().toISOString(), text: '原型静态检查未通过，自动重试 1/1：携带失败原因，原稿未变更' })
+    project.version++
+    await modal.getByRole('button', { name: '重新读取状态', exact: true }).click()
+    await expect(status).toContainText('自动重试 1/1')
+    await expect(modal.getByRole('alert')).toHaveCount(0)
+    for (const width of [1440, 1367, 390, 320]) {
+      await page.setViewportSize({ width, height: 1000 })
+      await status.scrollIntoViewIfNeeded()
+      assert.equal(await modal.evaluate(element => element.scrollWidth <= element.clientWidth + 1), true)
+      const bounds = await modal.boundingBox()
+      assert.ok(bounds && bounds.x >= 0 && bounds.x + bounds.width <= width + 1)
+      assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true)
+      await page.screenshot({ path: join(temporary, `adjustment-feedback-${width}.png`), fullPage: true })
+    }
+    const finish = (result: 'succeeded' | 'failed' | 'interrupted') => {
+      const job = project.jobs.at(-1)!
+      job.status = result; job.endedAt = new Date().toISOString()
+      project.status = result === 'succeeded' ? 'design_review' : result
+      if (result === 'failed') job.error = 'Fixture static validation failed; original preserved'
+      project.version++
+    }
+    project.revisions.push({ ...structuredClone(project.revisions[0]), id: 'adjusted', screens: project.revisions[0].screens.map(screen => ({ ...screen, id: `${screen.id}-adjusted`, html: '<main>Adjusted asynchronously</main>' })) })
+    project.events.push({ id: 'updated', at: new Date().toISOString(), text: 'prd:adjusted' })
+    finish('succeeded')
+    await expect(status).toContainText('最近设计任务已完成', { timeout: 10000 })
+    await expect(modal.getByRole('log')).toContainText('原型和各状态截图已更新')
+    assert.equal(await modal.getByRole('log').evaluate(element => element.scrollTop + element.clientHeight >= element.scrollHeight - 2), true)
+    await expect(modal.frameLocator('iframe').getByText('Adjusted asynchronously')).toBeVisible()
+    await page.reload({ waitUntil: 'networkidle' })
+    await page.getByRole('radio', { name: '设计', exact: true }).check()
+    await page.getByRole('button', { name: '调整原型', exact: true }).click()
+    await expect(status).toContainText('最近设计任务已完成')
+    assert.equal(submissions.length, 1)
+    for (const result of ['failed', 'cancelled', 'interrupted'] as const) {
+      await modal.getByRole('textbox', { name: '原型修改意见' }).fill(`仅本轮修改：${result}`)
+      await modal.getByRole('button', { name: '发送并调整原型', exact: true }).click()
+      await expect(status).toContainText('任务已接收')
+      assert.equal(submissions.at(-1)!.instruction, `仅本轮修改：${result}`)
+      if (result === 'cancelled') await modal.getByRole('button', { name: '取消任务', exact: true }).click()
+      else finish(result)
+      await expect(status).toContainText(result === 'failed' ? '设计任务失败' : result === 'cancelled' ? '设计任务已取消' : '设计任务已中断', { timeout: 10000 })
+      if (result === 'failed') await expect(modal.getByRole('alert')).toContainText('Fixture static validation failed')
+      assert.equal(project.revisions.length, 2)
+    }
+    assert.equal(submissions.length, 4)
+    assert.deepEqual(violations, [])
+  } finally {
+    releaseSubmission()
+    await browser?.close(); await server.close()
+    if (process.env.KEEP_UI_SCREENSHOTS === '1') console.log(`Adjustment feedback screenshots: ${temporary}`)
+    else rmSync(temporary, { recursive: true, force: true })
+  }
+})
 screens[0].html += '<section data-requirement-id="REQ1"><details><summary>Static details</summary>Hidden content</details><label><input id="static-check" type="checkbox">Static check</label><input id="static-text" aria-label="Static text" value="Original"><textarea aria-label="Static area">Original area</textarea><select aria-label="Static select"><option>First</option><option>Second</option></select><form><input value="Form data"><button>Static submit</button></form></section>'
 screens[1].html += '<svg data-requirement-id="REQ2" viewBox="0 0 24 24" width="48" height="48" aria-label="Static chart"><circle cx="12" cy="12" r="10" fill="#287650" /></svg>'
 screens[1].html = `<style>body{margin:0;min-height:100vh}.fluid-table{width:100%;table-layout:fixed}.fluid-table td{width:25%}@media(max-width:1000px){.fluid-table{font-size:30px}}</style><main style="width:100%;min-height:1800px;background:#f2f6f4">${screens[1].html}<table class="fluid-table"><tr><td>CASE-1041</td><td>Payment successful</td><td>High priority</td><td><span class="fluid-actions">View Edit Move Delete</span></td></tr></table><button data-requirement-id="REQ2" style="display:block;margin-left:1100px;width:160px">Right edge</button><footer style="margin-top:1400px">Design bottom</footer></main>`
@@ -36,6 +387,7 @@ test('requirements real router: strict mocked contracts, revisions, safe preview
   const temporary = mkdtempSync(join(tmpdir(), 'requirements-workspace-ui-'))
   const server = await createServer({ configFile: false, envDir: false, cacheDir: join(temporary, '.vite'), plugins: [react()], server: { host: '127.0.0.1', port: 0, watch: null } })
   let browser: Awaited<ReturnType<typeof chromium.launch>> | undefined
+  let releaseExport: (() => void) | undefined
   try {
     await server.listen()
     const address = server.httpServer?.address()
@@ -47,10 +399,14 @@ test('requirements real router: strict mocked contracts, revisions, safe preview
     let project: RequirementProject = { schemaVersion: 1, id: projectId, ownerId: 7, version: 1, title: '隔离需求项目', description: '订单需求', modelId: 'auto', createdAt: at, updatedAt: at, status: 'draft', sources: [], evidence: [], questions: [], decisions: [], revisions: [], jobs: [], events: [] }
     let created = false
     let analyzeCount = 0
+    let prdCount = 0
     let authReads = 0
     let failSave = true
     let heldJob = false
     let adjustmentCount = 0
+    const prdExports: string[] = []
+    let exportGate: Promise<void> | undefined
+    let prdExportError: string | undefined
     const writes: { path: string; body: Record<string, unknown> }[] = []
     const violations: string[] = []
     const external: string[] = []
@@ -66,6 +422,15 @@ test('requirements real router: strict mocked contracts, revisions, safe preview
       if (path === '/api/tasks') return reply({ items: [], busy: false })
       if (path.includes('/exports')) {
         assert.ok(project.revisions.some(revision => revision.id === url.searchParams.get('revision')))
+        if (url.searchParams.get('scope') === 'prd') {
+          assert.equal(url.searchParams.get('format'), 'docx')
+          const revision = project.revisions.find(revision => revision.id === url.searchParams.get('revision'))!
+          prdExports.push(revision.id)
+          if (exportGate) await exportGate
+          if (prdExportError) return reply({ error: prdExportError }, 409)
+          if (!revision.screens.length || revision.screenshots?.length !== revision.screens.length) return reply({ error: '当前修订缺少完整的原型截图，请先生成或验证设计后再导出 PRD。' }, 409)
+          return route.fulfill({ contentType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', body: 'isolated Word fixture' })
+        }
         return route.fulfill({ contentType: 'application/octet-stream', headers: { 'Content-Disposition': 'attachment; filename="requirements.txt"' }, body: `fixture ${url.searchParams.get('format')}` })
       }
       if (path.includes('/screenshots/')) return route.fulfill({ contentType: 'image/png', body: Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a0AAAAABJRU5ErkJggg==', 'base64') })
@@ -85,9 +450,10 @@ test('requirements real router: strict mocked contracts, revisions, safe preview
         return reply(project)
       }
       const body = request.postDataJSON() as Record<string, unknown>
+      const previousRevision = project.revisions.at(-1)?.id
       writes.push({ path, body })
       const suffix = path.slice(`${root}/${projectId}`.length)
-      const allowed = path === root ? ['title', 'description', 'modelId'] : /\/login$/.test(suffix) ? ['version', 'action'] : suffix === '/preview' ? ['version', 'origin'] : suffix === '/jobs' ? ['version', 'stage', 'instruction', 'screenId'] : suffix === '/sources' ? ['version', 'url'] : suffix === '/answers' ? ['version', 'answers'] : suffix === '/prd' ? ['version', 'prd'] : suffix === '/confirm' ? ['version', 'target'] : suffix === '/revisions' ? ['version', 'instruction'] : /\/cancel$/.test(suffix) ? ['version'] : []
+      const allowed = path === root ? ['title', 'description', 'modelId'] : /\/login$/.test(suffix) ? ['version', 'action'] : suffix === '/preview' ? ['version', 'origin', 'entryPaths'] : suffix === '/jobs' ? ['version', 'stage', 'instruction', 'screenId'] : suffix === '/sources' ? ['version', 'url'] : suffix === '/answers' ? ['version', 'answers'] : suffix === '/prd' ? ['version', 'prd'] : suffix === '/confirm' ? ['version', 'target'] : suffix === '/revisions' ? ['version', 'instruction'] : /\/cancel$/.test(suffix) ? ['version'] : []
       if (!allowed.length || Object.keys(body).some(key => !allowed.includes(key))) { violations.push(`Invalid fields ${path}: ${Object.keys(body)}`); return reply({ error: 'Invalid request fields' }, 400) }
       if (path === root) {
         project.title = String(body.title); project.description = String(body.description); created = true
@@ -106,8 +472,9 @@ test('requirements real router: strict mocked contracts, revisions, safe preview
         project.sources.push({ id: 'S2', name: String(body.url), url: String(body.url), kind: 'url', sha256: 'fixture', sizeBytes: 0 })
         project.events.push({ id: `E${project.version}`, at, text: 'inputs:changed' })
       } else if (suffix === '/answers') {
+        const prdClarification = requirementPrdClarification(project)
         for (const answer of body.answers as { questionId: string; answer: string }[]) project.decisions.push({ question: project.questions.find(question => question.id === answer.questionId)!, answer: answer.answer, at })
-        project.events.push({ id: `E${project.version}`, at, text: 'inputs:changed' }); project.status = 'draft'
+        project.events.push({ id: `E${project.version}`, at, text: prdClarification ? 'prd:inputs_changed' : 'inputs:changed' }); project.status = 'draft'
       } else if (suffix === '/prd') {
         assert.equal(request.method(), 'PATCH')
         if (failSave) { failSave = false; return reply({ error: '模拟保存失败' }, 400) }
@@ -131,21 +498,30 @@ test('requirements real router: strict mocked contracts, revisions, safe preview
           project.questions = analyzeCount === 1 ? [{ id: 'Q1', priority: 'P0', text: '允许重复订单吗？', impact: '影响唯一性', choices: ['不允许', '允许'], recommendation: '不允许' }] : []
           project.status = project.questions.length ? 'needs_input' : 'draft'
         } else if (body.stage === 'prd') {
-          project.revisions.push({ id: 'original', createdAt: at, prd: structuredClone(prd), screens: [] }); project.status = 'prd_review'
+          prdCount++
+          if (prdCount === 1) {
+            project.jobs.at(-1)!.endedAt = at
+            project.questions = [{ id: 'PRD-Q', priority: 'P0', text: '这是独立新增页面吗？', impact: '确定取证范围', choices: ['独立新增', '已有调整'], recommendation: '独立新增' }]
+            project.events.push({ id: `scope-${id}`, at, text: 'PRD 范围待确认：请回答澄清问题，补充资料后重新分析；未生成或覆盖 PRD' })
+            project.status = 'needs_input'
+          } else {
+            project.revisions.push({ id: 'original', createdAt: at, prd: structuredClone(prd), screens: [] }); project.status = 'prd_review'
+          }
         } else if (body.stage === 'design') {
           if (body.screenId) {
             assert.equal(body.screenId, 'screen1')
             adjustmentCount++
-            assert.equal(body.instruction, adjustmentCount === 1 ? '调整字段间距，保留其他页面' : '调整字段间距，保留其他页面\n\n标题再紧凑一些')
+            assert.equal(body.instruction, adjustmentCount === 1 ? '调整字段间距，保留其他页面' : '标题再紧凑一些')
             const previous = structuredClone(project.revisions.at(-1)!)
             project.revisions.push({ ...previous, id: `adjusted-${adjustmentCount}`, screens: previous.screens.map(screen => screen.title === screens[0].title ? { ...screen, html: screen.html + `<p>Adjusted ${adjustmentCount}</p>` } : screen), screenshots: previous.screens.map(screen => ({ screenId: screen.id, sha256: `fixture-${adjustmentCount}`, storageKey: `fixture-${adjustmentCount}` })) })
           } else project.revisions.push({ ...structuredClone(project.revisions.at(-1)!), id: 'designed', screens: [...structuredClone(screens), { ...structuredClone(screens[0]), id: 'screen-empty', state: '无数据', html: '<main data-requirement-id="REQ1">暂无订单</main>' }] })
           project.status = 'design_review'
         } else if (body.stage === 'validate') {
           const validation = { at, errors: [], artifactVersion: 1, allScreensValidated: true, interactionVerified: false, mode: 'static-script-disabled', screens: screens.map(screen => ({ screenId: screen.id, visual: 'passed', interaction: 'not_verified' })), limitations: ['Fixture: JavaScript disabled; static screenshots only.'] }
-          project.revisions.push({ ...structuredClone(project.revisions.at(-1)!), id: 'validated', screens: [{ ...structuredClone(screens[0]), html: '<script>fetch("https://forbidden.invalid/credentials")</script><button>Unsafe</button>' }, structuredClone(screens[1])], screenshots: [{ screenId: 'screen1', sha256: 'fixture', storageKey: 'fixture' }], validation })
+          project.revisions.push({ ...structuredClone(project.revisions.at(-1)!), id: 'validated', screens: [{ ...structuredClone(screens[0]), html: '<script>fetch("https://forbidden.invalid/credentials")</script><button>Unsafe</button>' }, structuredClone(screens[1])], screenshots: screens.map(screen => ({ screenId: screen.id, sha256: 'fixture', storageKey: 'fixture' })), validation })
         }
       }
+      if (project.revisions.at(-1)?.id && project.revisions.at(-1)!.id !== previousRevision) project.events.push({ id: `revision-${project.version}`, at, text: `prd:${project.revisions.at(-1)!.id}` })
       project.version++
       return reply(project)
     })
@@ -157,6 +533,7 @@ test('requirements real router: strict mocked contracts, revisions, safe preview
     await page.getByRole('textbox', { name: '需求描述', exact: true }).fill('隔离订单需求说明')
     await page.getByRole('button', { name: '创建项目', exact: true }).click()
     await expect(page.getByRole('heading', { name: '订单需求项目', exact: true })).toBeVisible()
+    await page.getByText('全部阶段操作', { exact: true }).click()
     await page.getByRole('textbox', { name: '现有系统地址', exact: true }).fill('http://localhost:5173')
     await page.getByRole('button', { name: '保存取证地址', exact: true }).click()
     await expect(page.getByText('http://localhost:5173 · 取证版本 1', { exact: true })).toBeVisible()
@@ -200,6 +577,7 @@ test('requirements real router: strict mocked contracts, revisions, safe preview
       assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true)
     }
     await page.setViewportSize({ width: 1440, height: 1000 })
+    await page.getByText('补充文件与链接', { exact: true }).click()
     await page.getByLabel('补充文件', { exact: true }).setInputFiles({ name: 'source.md', mimeType: 'text/markdown', buffer: Buffer.from('order source') })
     await page.getByRole('button', { name: '上传资料', exact: true }).click()
     await expect(page.getByLabel('补充文件', { exact: true })).toHaveValue('')
@@ -207,6 +585,7 @@ test('requirements real router: strict mocked contracts, revisions, safe preview
     await page.getByRole('button', { name: '添加链接', exact: true }).click()
     await expect(page.getByRole('textbox', { name: '补充链接', exact: true })).toHaveValue('')
     await page.getByRole('button', { name: '分析需求', exact: true }).click()
+    await page.getByRole('button', { name: '去填写答案', exact: true }).click()
     await page.getByRole('radio', { name: '不允许', exact: true }).check()
     await page.getByRole('button', { name: '提交已填写答案', exact: true }).click()
     await expect(page.getByText('已确认决策 · 1', { exact: true })).toBeVisible()
@@ -216,6 +595,16 @@ test('requirements real router: strict mocked contracts, revisions, safe preview
     await page.getByRole('button', { name: '分析需求', exact: true }).click()
     await expect(page.getByRole('button', { name: '生成 PRD', exact: true })).toBeEnabled()
     await page.getByRole('button', { name: '生成 PRD', exact: true }).click()
+    await expect(page.getByText('这些问题来自 PRD 阶段。提交全部答案后可继续生成 PRD；修改代码或资料后仍需重新分析。', { exact: true })).toBeVisible()
+    await page.getByRole('radio', { name: '独立新增', exact: true }).check()
+    await page.getByRole('button', { name: '提交已填写答案', exact: true }).click()
+    await expect(page.getByText('PRD 澄清答案已保存，可继续生成 PRD，无需重新分析。', { exact: true })).toBeVisible()
+    await expect(page.getByRole('button', { name: '继续生成 PRD', exact: true })).toBeEnabled()
+    assert.equal(analyzeCount, 2)
+    await page.getByRole('button', { name: '继续生成 PRD', exact: true }).click()
+    await page.getByRole('tab', { name: '系统产物', exact: true }).click()
+    await expect(page.getByRole('button', { name: '生成 PRD', exact: true })).toBeEnabled()
+    assert.equal(analyzeCount, 2, 'PRD continuation must not submit another analysis job')
     await page.getByRole('button', { name: '编辑 JSON', exact: true }).click()
     const editor = page.getByRole('textbox', { name: 'PRD JSON', exact: true })
     const edited = { ...structuredClone(prd), summary: '保存后的新修订' }
@@ -232,6 +621,7 @@ test('requirements real router: strict mocked contracts, revisions, safe preview
     await expect(page.getByText('保存后的新修订', { exact: true })).toBeVisible()
     await expect(page.getByRole('button', { name: '确认 PRD', exact: true })).toBeEnabled()
     await page.getByRole('button', { name: '确认 PRD', exact: true }).click()
+    await page.locator('.requirements-revision-feedback > summary').click()
     await page.getByRole('textbox', { name: '修订意见', exact: true }).fill('尚未提交的修订草稿')
     await page.getByRole('button', { name: '生成设计', exact: true }).click()
     await expect(page.getByRole('button', { name: '调整原型', exact: true })).toBeEnabled()
@@ -286,7 +676,7 @@ test('requirements real router: strict mocked contracts, revisions, safe preview
     await expect(page.getByRole('log', { name: '调整对话记录' }).getByText('原型和各状态截图已更新。', { exact: false })).toHaveCount(2)
     await page.getByRole('button', { name: '关闭原型调整', exact: true }).click()
     assert.deepEqual(project.revisions.at(-1)!.screens[1], untouched)
-    await expect(page.getByRole('slider', { name: '设计区域宽度', exact: true })).toHaveValue('70')
+    await expect(page.getByRole('slider', { name: '设计区域宽度', exact: true })).toHaveValue('56')
     await expect(page.locator('[aria-label="页面关联需求"], [aria-label="页面验收标准"]')).toHaveCount(0)
     const wideTrigger = page.getByRole('button', { name: '宽屏评审', exact: true })
     await wideTrigger.click()
@@ -331,6 +721,31 @@ test('requirements real router: strict mocked contracts, revisions, safe preview
     assert.equal(await page.locator('iframe').count(), 1)
     const modalBounds = await reviewModal.boundingBox()
     assert.ok(modalBounds && modalBounds.width >= 1400 && modalBounds.x >= 0)
+    exportGate = new Promise<void>(resolve => { releaseExport = resolve })
+    prdExportError = '当前修订缺少完整的原型截图，请先生成或验证设计后再导出 PRD。'
+    const writesBeforeExport = writes.length
+    const exportBefore = await reviewModal.getByRole('button', { name: '导出 PRD', exact: true }).boundingBox()
+    await reviewModal.getByRole('button', { name: '导出 PRD', exact: true }).press('Enter')
+    await expect(reviewModal.getByRole('button', { name: '正在导出…', exact: true })).toBeDisabled()
+    const exportDuring = await reviewModal.getByRole('button', { name: '正在导出…', exact: true }).boundingBox()
+    assert.ok(exportBefore && exportDuring && Math.abs(exportBefore.width - exportDuring.width) < 1 && Math.abs(exportBefore.x - exportDuring.x) < 1)
+    await expect(reviewModal.getByRole('status').filter({ hasText: '正在生成 PRD Word 文档' })).toBeVisible()
+    releaseExport?.(); exportGate = undefined
+    await expect(reviewModal.getByRole('alert')).toContainText('缺少完整的原型截图')
+    prdExportError = undefined
+    await expect(reviewModal.getByRole('button', { name: '导出 PRD', exact: true })).toBeEnabled()
+    assert.equal(prdExports.at(-1), project.revisions.at(-1)!.id)
+    assert.equal(writes.length, writesBeforeExport)
+    await expect(reviewModal).toBeVisible()
+    for (const width of [1440, 1367, 390, 320]) {
+      await page.setViewportSize({ width, height: 640 })
+      assert.equal(await reviewModal.evaluate(element => element.scrollWidth <= element.clientWidth + 1 && element.scrollHeight <= element.clientHeight + 1), true)
+      await page.screenshot({ path: join(temporary, `requirements-prd-export-error-${width}.png`), fullPage: true })
+    }
+    await reviewModal.getByRole('button', { name: '关闭导出提示', exact: true }).press('Enter')
+    await expect(reviewModal.getByRole('button', { name: '导出 PRD', exact: true })).toBeFocused()
+    await expect(reviewModal.getByRole('alert')).toHaveCount(0)
+    await page.setViewportSize({ width: 1440, height: 1000 })
     await page.getByRole('combobox', { name: '设计页面', exact: true }).click()
     await expect(reviewModal.getByRole('listbox')).toBeVisible()
     await reviewModal.getByRole('listbox').press('Escape')
@@ -355,10 +770,13 @@ test('requirements real router: strict mocked contracts, revisions, safe preview
       await expect(directoryTrigger).toHaveAttribute('aria-expanded', 'true')
       await directory.getByRole('button', { name: '订单检索', exact: true }).click()
       await expect(reviewModal.locator('[data-prd-module="订单检索"]')).toBeFocused()
+      await expect(reviewModal.locator('[data-prd-module="订单检索"]')).toHaveCSS('outline-style', 'none')
       await directory.getByRole('button', { name: '订单检索页面', exact: true }).click()
       await expect(reviewModal.locator('[data-prd-page="B2"]')).toBeFocused()
+      await expect(reviewModal.locator('[data-prd-page="B2"]')).toHaveCSS('outline-style', 'none')
       await directory.getByRole('button', { name: '检索订单', exact: true }).click()
       await expect(reviewModal.locator('[data-prd-requirement="REQ2"]')).toBeFocused()
+      await expect(reviewModal.locator('[data-prd-requirement="REQ2"]')).toHaveCSS('outline-style', 'none')
       await expect.poll(() => reviewModal.locator('[data-prd-requirement="REQ2"]').evaluate(element => {
         const target = element.getBoundingClientRect()
         const pane = element.closest('.requirements-prd-pane')!.getBoundingClientRect()
@@ -388,6 +806,8 @@ test('requirements real router: strict mocked contracts, revisions, safe preview
       if (width < 760) await page.getByRole('radio', { name: '设计', exact: true }).check()
       const closeBounds = await reviewModal.getByRole('button', { name: '关闭宽屏评审', exact: true }).boundingBox()
       assert.ok(closeBounds && closeBounds.width <= 30 && closeBounds.height <= 30)
+      const exportBounds = await reviewModal.getByRole('button', { name: '导出 PRD', exact: true }).boundingBox()
+      assert.ok(exportBounds && bounds && closeBounds && exportBounds.x >= bounds.x && exportBounds.x + exportBounds.width <= closeBounds.x && exportBounds.y >= bounds.y && exportBounds.y + exportBounds.height <= bounds.y + bounds.height)
       if (width > 760) {
         const heading = await reviewModal.getByRole('heading', { name: '审阅模式', exact: true }).boundingBox()
         const slider = await reviewModal.locator('.requirements-divider').boundingBox()
@@ -574,11 +994,12 @@ test('requirements real router: strict mocked contracts, revisions, safe preview
       await expect(listbox.getByRole('option').first()).toContainText('页')
       const headingLayout = await designSelector.evaluate(element => {
         const bounds = element.getBoundingClientRect()
-        const heading = element.closest('.requirements-design-heading')!.querySelector('h2')!.getBoundingClientRect()
-        return { width: bounds.width, aligned: Math.abs((bounds.top + bounds.bottom) / 2 - (heading.top + heading.bottom) / 2) < 2, border: getComputedStyle(element).borderTopWidth, background: getComputedStyle(element).backgroundColor }
+        const container = element.closest('.requirements-design-heading')!
+        const heading = container.querySelector('h2')!.getBoundingClientRect()
+        const parent = container.getBoundingClientRect()
+        return { width: bounds.width, ownRow: bounds.top >= heading.bottom, contained: bounds.left >= parent.left && bounds.right <= parent.right + 1, border: getComputedStyle(element).borderTopWidth, background: getComputedStyle(element).backgroundColor }
       })
-      assert.ok(headingLayout.width <= 361 && headingLayout.aligned)
-      if (width > 760) assert.ok(headingLayout.width >= 350)
+      assert.ok(headingLayout.contained && headingLayout.ownRow && headingLayout.width > 140)
       assert.equal(headingLayout.border, '0px')
       assert.notEqual(headingLayout.background, 'rgba(0, 0, 0, 0)')
       const bounds = await page.locator('.filter-select-cascade').boundingBox(); const trigger = await designSelector.boundingBox()
@@ -592,6 +1013,8 @@ test('requirements real router: strict mocked contracts, revisions, safe preview
       await page.getByRole('heading', { name: '设计原型', exact: true }).click()
       await expect(listbox).toHaveCount(0)
       const assertFit = async () => {
+        await scrollPrdTo('REQ2')
+        await assertReading('REQ2')
         await expect.poll(() => page.locator('.requirements-design-pane').evaluate(element => element.scrollHeight <= element.clientHeight + 1)).toBe(true)
         await expect.poll(() => page.locator('.requirements-artboard iframe').evaluate(element => {
           const frame = element.getBoundingClientRect()
@@ -655,6 +1078,9 @@ test('requirements real router: strict mocked contracts, revisions, safe preview
       } else await expect(prdPane).toBeVisible()
       await page.screenshot({ path: join(temporary, `requirements-static-preview-${width}.png`), fullPage: true })
       assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true)
+      const exportBounds = await page.getByRole('button', { name: '导出 PRD', exact: true }).boundingBox()
+      const controlBounds = await page.locator('.requirements-review-controls').boundingBox()
+      assert.ok(exportBounds && controlBounds && controlBounds.x >= 0 && controlBounds.x + controlBounds.width <= width + 1 && exportBounds.x >= controlBounds.x && exportBounds.x + exportBounds.width <= controlBounds.x + controlBounds.width + 1)
       const boxes = await page.locator('.requirements-stage-actions button').evaluateAll(elements => elements.map(element => { const rect = element.getBoundingClientRect(); return { x: rect.x, y: rect.y, right: rect.right, bottom: rect.bottom } }))
       for (const [index, box] of boxes.entries()) {
         assert.ok(box.x >= 0 && box.right <= width + 1)
@@ -688,6 +1114,11 @@ test('requirements real router: strict mocked contracts, revisions, safe preview
     await expect(page.locator('iframe')).toHaveCount(0)
     await page.getByRole('button', { name: '确认设计', exact: true }).click()
     await expect(page.getByRole('button', { name: '确认设计', exact: true })).toBeDisabled()
+    const downloadPrd = page.waitForEvent('download')
+    await page.getByRole('button', { name: '导出 PRD', exact: true }).click()
+    assert.equal((await downloadPrd).suggestedFilename(), `prd-${projectId}-${project.revisions.at(-1)!.id}.docx`)
+    await expect(page.getByRole('status').filter({ hasText: 'PRD Word 文档已开始下载' })).toBeVisible()
+    assert.equal(prdExports.at(-1), project.revisions.at(-1)!.id)
     for (const format of ['MD', 'DOCX', 'HTML', 'ZIP']) {
       const download = page.waitForEvent('download')
       await page.getByRole('link', { name: format, exact: true }).click()
@@ -698,11 +1129,25 @@ test('requirements real router: strict mocked contracts, revisions, safe preview
     await expect(page.getByText('历史修订 · 只读', { exact: true })).toBeVisible()
     await expect(page.getByRole('button', { name: '确认 PRD', exact: true })).toBeDisabled()
     await expect(page.getByRole('link', { name: 'MD', exact: true })).toHaveAttribute('href', /revision=original/)
+    await expect(page.getByRole('button', { name: '导出 PRD', exact: true })).toBeEnabled()
+    await page.getByRole('button', { name: '导出 PRD', exact: true }).click()
+    await expect(page.locator('.requirements-review-controls').getByRole('alert')).toContainText('缺少完整的原型截图')
+    assert.equal(prdExports.at(-1), 'original')
     await page.getByRole('combobox', { name: '修订历史', exact: true }).click()
     await page.getByRole('listbox').press('End'); await page.getByRole('listbox').press('Enter')
+    const exportableRevision = project.revisions.at(-1)!.id
     await page.getByRole('button', { name: '创建修订', exact: true }).click()
     await expect(page.getByRole('textbox', { name: '修订意见', exact: true })).toHaveValue('')
     await expect(page.getByRole('button', { name: '生成 PRD', exact: true })).toBeDisabled()
+    await page.getByRole('combobox', { name: '修订历史', exact: true }).click()
+    await page.getByRole('listbox').press('End'); await page.getByRole('listbox').press('ArrowUp'); await page.getByRole('listbox').press('Enter')
+    await expect(page.getByText('历史修订 · 只读', { exact: true })).toBeVisible()
+    const historicalDownload = page.waitForEvent('download')
+    await page.getByRole('button', { name: '导出 PRD', exact: true }).click()
+    assert.equal((await historicalDownload).suggestedFilename(), `prd-${projectId}-${exportableRevision}.docx`)
+    assert.equal(prdExports.at(-1), exportableRevision)
+    await page.getByRole('combobox', { name: '修订历史', exact: true }).click()
+    await page.getByRole('listbox').press('End'); await page.getByRole('listbox').press('Enter')
     const jobErrors = ['Historical analysis failure', 'Historical PRD failure', 'Last design failure']
     project.jobs.push(
       { id: 'failed-analysis', stage: 'analyze', status: 'failed', startedAt: at, error: jobErrors[0] },
@@ -717,7 +1162,7 @@ test('requirements real router: strict mocked contracts, revisions, safe preview
     await expect(overview.getByRole('alert')).toHaveCount(1)
     await expect(overview.getByRole('alert')).toHaveText(`生成设计 · ${jobErrors[2]}`)
     for (const message of jobErrors.slice(0, -1)) await expect(overview).not.toContainText(message)
-    project.jobs.at(-1)!.error = '[PAGE_CAPTURE_LOGIN] 业务页面需要登录，独立浏览器没有会话'
+    project.jobs.at(-1)!.error = '[PAGE_MAPPING_SCHEMA] 取证范围必须仅返回 pages 页面列表，不是 PRD 正文'
     project.version++
     await historyTrigger.focus(); await historyTrigger.press('Enter')
     await page.getByRole('button', { name: '刷新项目列表', exact: true }).click()
@@ -726,13 +1171,13 @@ test('requirements real router: strict mocked contracts, revisions, safe preview
     await expect(supplement).toBeVisible()
     await expect(supplement.getByRole('button', { name: '重新取证并生成 PRD', exact: true })).toBeVisible()
     await expect(supplement.getByRole('button', { name: '重新取证并生成设计', exact: true })).toHaveCount(0)
-    await expect(supplement).toContainText('仅在你自己的浏览器登录不会同步到平台')
+    await expect(supplement).toContainText('本次取证已停止')
     await supplement.getByRole('textbox', { name: '修正取证地址', exact: true }).fill('https://tmp.test.sunmi.com')
     await supplement.getByRole('button', { name: '保存地址', exact: true }).click()
     assert.equal(project.preview?.origin, 'https://tmp.test.sunmi.com')
     await supplement.getByRole('textbox', { name: '页面访问补充说明', exact: true }).fill('password=not-a-real-secret')
     await supplement.getByRole('button', { name: '提交补充资料', exact: true }).click()
-    await expect(page.getByRole('alert').filter({ hasText: '请移除密码' })).toBeVisible()
+    await expect(supplement.getByRole('alert')).toContainText('请移除密码')
     for (const width of [1440, 1367, 390, 320]) {
       await page.setViewportSize({ width, height: 1000 })
       await supplement.scrollIntoViewIfNeeded()
@@ -745,9 +1190,8 @@ test('requirements real router: strict mocked contracts, revisions, safe preview
     await page.getByRole('button', { name: '刷新项目列表', exact: true }).click()
     await page.keyboard.press('Escape')
     await expect(supplement).toHaveCount(0)
-    const jobHistory = page.locator('details').filter({ has: page.locator('summary', { hasText: /^任务与进度记录$/ }) })
-    await expect(jobHistory).not.toHaveAttribute('open')
-    await jobHistory.locator('summary').click()
+    await page.getByRole('tab', { name: /^任务记录/ }).click()
+    const jobHistory = page.getByRole('region', { name: '阶段任务', exact: true })
     for (const message of jobErrors) await expect(jobHistory.getByText(message, { exact: true })).toBeVisible()
     for (const status of ['failed', 'cancelled', 'interrupted'] as const) {
       project.status = status; project.version++
@@ -822,6 +1266,7 @@ test('requirements real router: strict mocked contracts, revisions, safe preview
     assert.deepEqual(violations, [])
     assert.deepEqual(external, [])
   } finally {
+    releaseExport?.()
     await browser?.close(); await server.close()
     if (process.env.KEEP_UI_SCREENSHOTS === '1') console.log(`Requirements screenshots: ${temporary}`)
     else rmSync(temporary, { recursive: true, force: true })

@@ -1,7 +1,9 @@
 import * as React from 'react'
 import { ListTree, Pencil, Save, X } from 'lucide-react'
-import type { StructuredPrd } from '../../../shared/requirements'
-import { prdSections } from '../../../shared/prd-sections'
+import type { RequirementRevision, StructuredPrd } from '../../../shared/requirements'
+import { prdSections, prdTextItems as textItems } from '../../../shared/prd-sections'
+import { prdEditionNames, validatePrdTemplate, type PrdEdition } from '../../../shared/prd-template'
+import { PrdTemplateReview } from './PrdTemplateReview'
 
 export function parsePrd(text: string): StructuredPrd {
   const value = JSON.parse(text) as StructuredPrd
@@ -9,7 +11,7 @@ export function parsePrd(text: string): StructuredPrd {
   if (!value || typeof value.title !== 'string' || typeof value.summary !== 'string' || !Array.isArray(value.blocks) || !Array.isArray(value.requirements)) throw new Error('PRD 必须包含 title、summary、blocks 和 requirements')
   const ids = new Set<string>()
   for (const item of value.requirements) {
-    if (!item || typeof item.id !== 'string' || !item.id.trim() || ids.has(item.id) || typeof item.title !== 'string' || typeof item.description !== 'string' || !strings(item.sourceIds) || !Array.isArray(item.acceptance) || item.acceptance.some(criterion => !criterion || typeof criterion.id !== 'string' || typeof criterion.text !== 'string') || (item.nonVisualReason !== undefined && typeof item.nonVisualReason !== 'string')) throw new Error('需求 ID 必须唯一，且需求、验收标准和来源字段必须完整')
+    if (!item || typeof item.id !== 'string' || !item.id.trim() || ids.has(item.id) || typeof item.title !== 'string' || (item.capability !== undefined && typeof item.capability !== 'string') || typeof item.description !== 'string' || !strings(item.sourceIds) || !Array.isArray(item.acceptance) || item.acceptance.some(criterion => !criterion || typeof criterion.id !== 'string' || typeof criterion.text !== 'string') || (item.nonVisualReason !== undefined && typeof item.nonVisualReason !== 'string')) throw new Error('需求 ID 必须唯一，且需求、验收标准和来源字段必须完整')
     ids.add(item.id)
     if (item.scenario !== undefined && typeof item.scenario !== 'string') throw new Error('对应场景必须为文本')
     if (item.fields !== undefined && (!Array.isArray(item.fields) || item.fields.some(field => !field || typeof field.name !== 'string' || !field.name.trim() || typeof field.description !== 'string'))) throw new Error('字段信息必须包含名称和描述')
@@ -21,10 +23,11 @@ export function parsePrd(text: string): StructuredPrd {
     if (block.module !== undefined && (typeof block.module !== 'string' || !block.module.trim())) throw new Error('功能模块名称不能为空')
     if (block.table && (!strings(block.table.columns) || !Array.isArray(block.table.rows) || block.table.rows.some(row => !strings(row) || row.length !== block.table!.columns.length))) throw new Error('表格行必须与 columns 列数一致')
   }
+  if (value.templateVersion !== undefined) validatePrdTemplate(value)
   return value
 }
 
-export function PrdReview({ prd, readOnly, busy, selectedId, selectionVersion = 0, reviewMode = false, onRead, onSelect, onSave, onEditing }: {
+export function PrdReview({ prd, readOnly, busy, selectedId, selectionVersion = 0, reviewMode = false, onRead, onSelect, onSave, onEditing, revision, projectId, edition = 'business', onEditionChange, activeNote, onNote }: {
   prd: StructuredPrd
   readOnly: boolean
   busy: boolean
@@ -35,6 +38,12 @@ export function PrdReview({ prd, readOnly, busy, selectedId, selectionVersion = 
   onSelect: (id: string) => void
   onSave: (prd: StructuredPrd) => Promise<void>
   onEditing: (editing: boolean) => void
+  revision?: RequirementRevision
+  projectId?: string
+  edition?: PrdEdition
+  onEditionChange?(value: PrdEdition): void
+  activeNote?: string
+  onNote?(key: string): void
 }) {
   const [editing, setEditing] = React.useState(false)
   const [text, setText] = React.useState('')
@@ -45,10 +54,26 @@ export function PrdReview({ prd, readOnly, busy, selectedId, selectionVersion = 
   const [directoryTarget, setDirectoryTarget] = React.useState('')
   const directoryId = React.useId()
   const directoryTrigger = React.useRef<HTMLButtonElement>(null)
+  const business = edition === 'business' && prd.templateVersion === 2
+  const editionAnchor = React.useRef('')
+  const explicitBusinessAnchor = React.useRef('')
+  const editionId = React.useId()
+  function changeEdition(value: PrdEdition) {
+    const pane = content.current?.closest('.requirements-prd-pane')
+    const top = pane?.getBoundingClientRect().top || 0
+    editionAnchor.current = (business && explicitBusinessAnchor.current) || content.current?.querySelector('[data-note-key][aria-pressed=true]')?.closest<HTMLElement>('[data-prd-requirement]')?.dataset.prdRequirement || selectedId || Array.from(content.current?.querySelectorAll<HTMLElement>('[data-prd-requirement]') || []).find(element => element.getBoundingClientRect().bottom > top)?.dataset.prdRequirement || ''
+    onEditionChange?.(value)
+  }
+  React.useLayoutEffect(() => {
+    if (!editionAnchor.current) return
+    const element = Array.from(content.current?.querySelectorAll<HTMLElement>('[data-prd-requirement]') || []).find(item => item.dataset.prdRequirement === editionAnchor.current)
+    const pane = element?.closest('.requirements-prd-pane')
+    if (pane && element) pane.scrollTop += element.getBoundingClientRect().top - pane.getBoundingClientRect().top - 16
+  }, [edition])
   const reportReading = React.useEffectEvent((id: string) => onRead?.(id))
   React.useEffect(() => {
     const pane = content.current?.closest<HTMLElement>('.requirements-prd-pane')
-    if (!pane || editing) return
+    if (!pane || editing || business) return
     let frame = 0
     let previous = ''
     const measure = () => {
@@ -79,29 +104,27 @@ export function PrdReview({ prd, readOnly, busy, selectedId, selectionVersion = 
       window.removeEventListener('resize', schedule)
       observer.disconnect()
     }
-  }, [prd, editing, reviewMode])
-  const { sections, unassigned } = prdSections(prd)
-  const modules = new Map<string, typeof sections>()
-  for (const section of sections) {
-    const name = section.block.module || '未分组功能'
-    const pages = modules.get(name) || []
-    pages.push(section)
-    modules.set(name, pages)
+  }, [prd, editing, reviewMode, edition, business])
+  const { modules, unassigned } = prdSections(prd)
+  const pointerSelection = React.useRef(false)
+  const selectFromButton = (id: string, pointer: boolean) => {
+    pointerSelection.current = pointer
+    onSelect(id)
   }
-  const locate = (attribute: string, value: string) => {
+  const locate = (attribute: string, value: string, pointer: boolean) => {
     const element = Array.from(content.current?.querySelectorAll<HTMLElement>(`[${attribute}]`) || []).find(item => item.getAttribute(attribute) === value)
     const pane = element?.closest<HTMLElement>('.requirements-prd-pane')
     if (!element || !pane) return
     pane.scrollTo({ top: pane.scrollTop + element.getBoundingClientRect().top - pane.getBoundingClientRect().top - 16, behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth' })
+    element.toggleAttribute('data-pointer-focus', pointer)
     element.focus({ preventScroll: true })
     setDirectoryTarget(`${attribute}:${value}`)
   }
   React.useEffect(() => { setDirectoryOpen(false); setDirectoryTarget('') }, [reviewMode, prd, editing])
-  const directoryNode = (label: string, attribute: string, value: string) => <button type="button" aria-current={directoryTarget === `${attribute}:${value}` ? 'location' : undefined} onClick={() => locate(attribute, value)}>{label}</button>
-  const textItems = (text: string) => text.split(/\r?\n/).map(line => line.trim()).filter(Boolean)
+  const directoryNode = (label: string, attribute: string, value: string) => <button type="button" aria-current={directoryTarget === `${attribute}:${value}` ? 'location' : undefined} onClick={event => locate(attribute, value, event.detail > 0)}>{label}</button>
   const renderRequirement = (item: StructuredPrd['requirements'][number]) => <li key={item.id} className="requirements-prd-function"><article tabIndex={-1} data-prd-requirement={item.id} data-selected={selectedId === item.id}>
     <ul className="requirements-function-outline">
-      <li>功能名称：<button aria-pressed={selectedId === item.id} onClick={() => onSelect(item.id)}>{item.title}</button></li>
+      <li>功能名称：<button aria-pressed={selectedId === item.id} onClick={event => selectFromButton(item.id, event.detail > 0)}>{item.title}</button></li>
       <li>对应场景：{item.scenario || '--'}</li>
       <li>功能描述：<ul className="requirements-description-list">
         {textItems(item.description).map((text, index) => <li key={index}>{text}</li>)}
@@ -120,12 +143,14 @@ export function PrdReview({ prd, readOnly, busy, selectedId, selectionVersion = 
       const bounds = pane.getBoundingClientRect()
       pane.scrollTo({ top: pane.scrollTop + target.top - bounds.top - 16, behavior: 'smooth' })
     }
+    element?.toggleAttribute('data-pointer-focus', pointerSelection.current)
     element?.focus({ preventScroll: true })
+    pointerSelection.current = false
   }, [selectedId, selectionVersion])
   React.useEffect(() => { if (editing) editor.current?.focus() }, [editing])
   function finish() { setEditing(false); onEditing(false); setError('') }
   return <div className="requirements-prd" ref={content}>
-    {reviewMode && !editing && <div className="requirements-prd-directory" data-open={directoryOpen} onPointerEnter={event => { if (event.pointerType === 'mouse') setDirectoryOpen(true) }} onPointerLeave={event => { if (event.pointerType === 'mouse') setDirectoryOpen(false) }} onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget) && !event.currentTarget.matches(':hover')) setDirectoryOpen(false) }} onKeyDown={event => {
+    {reviewMode && !business && !editing && <div className="requirements-prd-directory" data-open={directoryOpen} onPointerEnter={event => { if (event.pointerType === 'mouse') setDirectoryOpen(true) }} onPointerLeave={event => { if (event.pointerType === 'mouse') setDirectoryOpen(false) }} onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget) && !event.currentTarget.matches(':hover')) setDirectoryOpen(false) }} onKeyDown={event => {
       if (event.key === 'Escape' && directoryOpen) { event.preventDefault(); event.stopPropagation(); setDirectoryOpen(false); directoryTrigger.current?.focus() }
     }}>
       <button ref={directoryTrigger} type="button" className="requirements-directory-trigger" aria-label="PRD 目录" title="PRD 目录" aria-expanded={directoryOpen} aria-controls={directoryId} onClick={() => setDirectoryOpen(open => !open)}><ListTree size={16} /></button>
@@ -135,15 +160,19 @@ export function PrdReview({ prd, readOnly, busy, selectedId, selectionVersion = 
         {unassigned.length > 0 && <li>{directoryNode('其他功能', 'data-prd-unassigned', 'true')}<ul>{unassigned.map(item => <li key={item.id}>{directoryNode(item.title, 'data-prd-requirement', item.id)}</li>)}</ul></li>}</ul>
       </nav>
     </div>}
-    <div className="requirements-toolbar"><h2>PRD</h2>{!readOnly && !editing && <button disabled={busy} onClick={() => { setText(JSON.stringify(prd, null, 2)); setEditing(true); onEditing(true) }}><Pencil size={15} />编辑 JSON</button>}</div>
+    {!(business && reviewMode) && <div className="requirements-toolbar"><h2>PRD</h2>{prd.templateVersion === 2 && !editing && <fieldset className="requirements-segments requirements-prd-editions" disabled={busy}><legend className="requirements-sr-only">PRD 版本</legend>{(['business', 'development'] as const).map(value => <label key={value}><input type="radio" name={editionId} checked={edition === value} onChange={() => changeEdition(value)} />{prdEditionNames[value]}</label>)}</fieldset>}{!readOnly && !editing && <button disabled={busy} onClick={() => { setText(JSON.stringify(prd, null, 2)); setEditing(true); onEditing(true) }}><Pencil size={15} />编辑 JSON</button>}</div>}
     {editing ? <form onSubmit={event => {
       event.preventDefault(); setError('')
-      void (async () => { try { await onSave(parsePrd(text)); finish() } catch (caught) { setError(caught instanceof Error ? caught.message : '保存失败') } })()
+      void (async () => { try {
+        const next = parsePrd(text)
+        if (prd.templateVersion === 2 && next.templateVersion !== 2) throw new Error('双模板 PRD 不能移除 templateVersion 或降级为旧格式')
+        await onSave(next); finish()
+      } catch (caught) { setError(caught instanceof Error ? caught.message : '保存失败') } })()
     }}>
       <label>PRD JSON<textarea ref={editor} spellCheck={false} rows={25} value={text} disabled={busy} onChange={event => setText(event.target.value)} /></label>
       {error && <p role="alert" className="requirements-error">{error}</p>}
       <div className="requirements-toolbar"><button disabled={busy} type="submit"><Save size={15} />保存 PRD</button><button type="button" disabled={busy} onClick={finish}><X size={15} />放弃编辑</button></div>
-    </form> : <>
+    </form> : prd.templateVersion === 2 ? <PrdTemplateReview prd={prd} edition={edition} selectedId={selectedId} onSelect={selectFromButton} revision={revision} projectId={projectId} focused={reviewMode} activeNote={activeNote} onNote={(key, requirementId) => { if (requirementId) explicitBusinessAnchor.current = requirementId; onNote?.(key) }} /> : <>
       <h3>{prd.title}</h3><p className="requirements-prewrap">{prd.summary}</p>
       <ul className="requirements-module-outline">{Array.from(modules, ([name, pages]) => <li key={name}><section className="requirements-prd-module" aria-label={name} data-prd-module={name} tabIndex={-1}>
         <h3>模块：{name}</h3>

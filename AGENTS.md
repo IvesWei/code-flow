@@ -1,5 +1,11 @@
 # Project Agent Rules
 
+## Architecture Diagram Maintenance
+
+- Keep [docs/architecture.html](docs/architecture.html) as the current, offline-readable architecture map. In the same change, update its diagrams, relationship descriptions, source links, configuration snapshot and review date whenever routes, module responsibilities, Agent roles/permissions/budgets, model integrations, data flows, storage, execution or approval boundaries change.
+- Describe implemented behavior, not planned capabilities. Preserve the distinction between platform orchestration, Agent proposals and actual tool execution; do not imply OS sandboxing, distributed scheduling or automatic durable replay.
+- Run `node --import tsx --test server/tests/ui/architecture.test.ts` after architecture-map changes. It checks route/API-module, component-name and role-configuration consistency, offline behavior, keyboard navigation, print visibility and four responsive widths. Semantic architecture changes still require manual synchronization; this is not runtime auto-discovery.
+
 ## Frontend Styles And Regression Checks
 
 - Preserve the existing Code/Flow visual language and use lucide icons. Keep changes scoped to the affected controls and layouts.

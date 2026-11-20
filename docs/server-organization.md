@@ -1,5 +1,7 @@
 # 服务端工程管理规范
 
+当前系统分层、主要模块关系、业务流程与受控 Agent 边界见 [HTML 架构图](architecture.html)。涉及架构的变更需同步更新该图和核对日期，并运行 `node --import tsx --test server/tests/ui/architecture.test.ts`；图中展示的是当前实现，不是未来规划。
+
 ## 目录与职责
 
 按功能模块归档，保持浅层目录；不为每个功能重复创建 controllers、services、repositories 等层级。
@@ -7,6 +9,7 @@
 ```text
 server/
   index.ts
+  agents/
   security/
   tasks/
   execution/
@@ -22,6 +25,7 @@ server/
 | 位置 | 职责 | 主要文件 |
 | --- | --- | --- |
 | index.ts | 组装服务、注册路由、启动与关闭；本轮不拆分现有路由 | index.ts |
+| agents | 跨功能共用的角色配置、交接、执行边界及文件权限；不拥有业务状态或流程审批 | profiles.ts、runtime.ts、workspace.ts |
 | security | OAuth、登录状态、来源与任务归属控制 | auth.ts、oauth-config.ts、access.ts |
 | tasks | 任务状态、变更、重启恢复、展示数据和上传名 | store.ts、task-summary.ts、upload-name.ts |
 | execution | 编排编码流程、SDK 会话恢复、历史兼容修复、模型对话、执行环境和工具记录 | worker.ts、copilot-session.ts、session-history.ts、resume-context.ts、model-turn.ts、models.ts、execution-environment.ts、tool-detail.ts |
@@ -74,3 +78,39 @@ server/
 目录整理只调整位置、引用、脚本和路径说明，不同时更改 API、业务逻辑、数据库结构或数据格式。路由提取和 worker 拆分应作为后续独立变更，另行评估和验证。
 
 每次结构调整至少执行聚焦回归、完整测试发现和构建验证；记录已有失败，不能顺便重写无关配置或用户修改。
+
+## 受控 Agent 边界
+
+业务流程仍由平台的 Service / Worker 决定。Agent 不自主协商，不直接调用其他 Agent，不持有审批、发布或任务状态变更权限；本次不引入 LangChain、LangGraph 或额外部署服务。
+
+| Agent | 所属实现 | 职责与权限 |
+| --- | --- | --- |
+| RequirementAgent | requirements/model.ts | 分析、澄清、生成 PRD；只读快照与临时笔记 |
+| DesignAgent | requirements/model.ts、prototype-adjustment.ts | 基于已确认 PRD 生成或调整原型；原型调整继续使用原有专属会话 |
+| CodingAgent | execution/coding-agent.ts，由 worker.ts 调度 | 编码会话的角色、工具与预算边界；直接文件权限限定任务工作区及精确的只读附件 |
+| TestPlanningAgent | testing/planning-model.ts | 只读需求、参考代码，生成用例定义 |
+| test-review | 独立规划与编码自测的全新阶段会话 | 只读原始依据与待评审定义，不能修改或自行批准 |
+| test-authoring | worker.ts 的独立生成阶段会话 | 仅编写允许的测试文件，不执行命令或修改业务代码 |
+| TestImplementationAgent | testing/execution-model.ts | 只读代码，返回测试文件提案；平台校验后写入 |
+| browser-planning | worker.ts 的独立浏览器规划会话 | 只读规划，实际浏览器执行及证据由平台产生 |
+
+原 CopilotRequirementModel、CopilotPlanningModel、CopilotExecutionModel 入口保留兼容；实际任务路由进入上述 Agent。截图、导出、测试执行、依赖安装与 Git 发布仍为确定性工具或平台服务，不为这些操作再增加模型回合。
+
+### 交接、权限与预算
+
+- `agents/runtime.ts` 对输入创建不可变副本，输出复制后才交回平台；交接元数据包含协议版本、角色、运行 ID、资源摘要、输入版本和指纹。不把模型摘要当成完整的跨阶段契约，不共享可变业务对象。
+- 需求及设计接收结果前检查语义输入指纹，保存时再次在 CAS 更新中检查；进度事件和会话绑定不算业务输入变化。测试规划校验原始输入和参考代码快照；测试实现校验执行版本、用例包与工作区。已有来源、字段、映射、HTML、用例覆盖和断言校验继续生效。
+- 同一资源的 Agent 执行互斥；编码任务继续由 Worker 的活动任务集合互斥，并在执行入口拒绝重复调用。不同任务的工作区保持隔离。
+- 编码任务先保存完成审计再标记业务成功；审计写入失败保留已有代码和执行证据，不标记成功、不自动重放。存储持续不可用时记录运维错误，需恢复存储后处理。
+- `agents/profiles.ts` 是角色和预算的固定定义。角色约束与原有工具/路径权限取交集，不能用新包装放宽旧限制。模型不能使用任务/Agent 委派工具；只有平台代码能选择允许的后续角色。
+- 需求、设计每次执行最多 12 次 SDK `send`、128 次工具调用；独立测试实现最多 1 次 `send`、256 次工具调用。测试规划及编码的根预算为 256 次 `send`，子角色还受各自上限约束。编码各自测阶段共享父预算，重建会话不能重置预算。拒绝的工具尝试也计入工具预算。
+- 预算耗尽会产生明确错误，不自动重放。既有格式修正、批次修复和原型校正上限保留，不因 Agent 化增加新重试回路。不截断需求、删除用例或伪造通过来满足预算。
+- 生命周期元数据写入既有任务/规划进度事件；需求会话审计同时记录 Agent 交接信息。子角色请求记录真实角色、父角色和请求指纹，使用同一运行 ID 关联。公共元数据不包含原始输入、提示词、凭据或原始错误文本。`completed` 表示该次 Agent 调用结束，不代表 PRD 已确认、测试已通过或发布已获批准。
+
+### 恢复和安全边界
+
+持久化继续使用既有项目、作业、阶段产物与 SDK 历史，不新增数据库结构。重启后按原有规则标记中断，用户显式继续或重试；不会自动重放写文件、命令、审批或发布。阶段产物仍按已有指纹规则复用，不增加仅凭角色或会话 ID 的结果缓存。
+
+这里的互斥是进程内控制，配合现有存储实例锁及运行租约，不是分布式任务队列。直接文件与工具检查也不是 OS 沙箱；编码 Agent 仍沿用已有受控 shell 能力。生产环境如需隔离不可信代码，必须另行提供进程/容器、网络与文件系统隔离。
+
+`send` 预算限制平台提交次数，工具预算限制工具循环，不等于供应商内部推理次数、精确 token 或金额硬上限；现有用量记录仍用于计量。扩大用例规模或缩小批次可能触及预算，系统保留已保存检查点并显式失败，不默默缩减验收范围。

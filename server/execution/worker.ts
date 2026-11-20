@@ -27,6 +27,9 @@ import { caseInputs, fileFingerprint, fingerprint, SelfTestArtifacts, selfTestRu
 import { canWriteTestFile } from '../verification/self-test-permissions.js'
 import { attachModelUsage, type ModelUsageObserver } from './model-usage.js'
 import { appendSerializedDecisionSuffix } from './prompts.js'
+import { CodingAgent } from './coding-agent.js'
+import { AgentBoundaryError } from '../agents/runtime.js'
+import { agentFileAccess } from '../agents/workspace.js'
 
 interface UserAnswer {
   answer: string
@@ -56,6 +59,14 @@ export class CodingWorker {
   }
 
   async execute(task: CodingTask, prdPath: string, designPaths: string[], token: string, guidance?: string, selfTestOnly = false, allowNewSession = false, selectedCaseIds: string[] = [], intent: 'repair' | 'execute' = 'repair'): Promise<void> {
+    if (this.running.has(task.id)) throw new AgentBoundaryError('AGENT_BUSY')
+    task = structuredClone(task)
+    const agent = new CodingAgent(task, async event => {
+      this.store.entry(task.id, event.kind === 'failed' ? 'error' : 'info', `agent:${JSON.stringify(event)}`)
+      await this.store.flush()
+    }, { guidance, selfTestOnly, selectedCaseIds, intent })
+    let agentFailed = false
+    let agentCompleted = false
     let client: CopilotClient | undefined
     let session: Awaited<ReturnType<CopilotClient['createSession']>> | undefined
     const previousError = task.error
@@ -68,6 +79,7 @@ export class CodingWorker {
     const usageObservers: ModelUsageObserver[] = []
     this.running.add(task.id)
     try {
+      await agent.record('started')
       const workspace = join(this.root, 'workspaces', task.id)
       if (selfTestOnly) {
         this.store.status(task.id, 'SELF_TEST', '在现有分支和工作目录上补跑编码自测')
@@ -92,7 +104,7 @@ export class CodingWorker {
       const sessionDirectory = join(this.root, 'sessions', task.id)
       await mkdir(sessionDirectory, { recursive: true })
       const initialModel = this.store.get(task.id)?.modelId || defaultModel()
-      const sessionConfig: SessionConfig = {
+      const baseSessionConfig: SessionConfig = {
         model: initialModel,
         streaming: true,
         gitHubToken: token,
@@ -101,12 +113,16 @@ export class CodingWorker {
           if (/^(bash|shell|powershell|run_in_terminal|execute|terminal)$/i.test(input.toolName) &&
               prohibitedGitOperation(JSON.stringify(input.toolArgs))) return { permissionDecision: 'deny', permissionDecisionReason: '提交、推送和创建 PR 必须通过用户确认后的平台接口执行' }
         } },
-        onPermissionRequest: (request) => {
+        onPermissionRequest: async (request) => {
           if ('managedApprovalRequired' in request && request.managedApprovalRequired) return { kind: 'user-not-available' }
           if (intent === 'execute' && planningSelfTest && request.kind !== 'read') return { kind: 'reject', feedback: '执行已有用例时只读评审，不允许修改用例或业务文件' }
           if (request.kind === 'shell' && prohibitedGitOperation(request.fullCommandText)) return { kind: 'reject', feedback: '提交、推送和创建 PR 必须通过用户确认后的平台接口执行' }
           if (planningSelfTest && !['read', 'write'].includes(request.kind)) {
             return { kind: 'reject', feedback: '自测设计阶段仅允许读取代码和编写测试文件，测试命令由平台逐条执行' }
+          }
+          if (!planningSelfTest && (request.kind === 'read' || request.kind === 'write')) {
+            const path = request.kind === 'write' ? request.resolvedPath || request.fileName : request.path
+            if (request.requestSandboxBypass || typeof path !== 'string' || !await agentFileAccess(workspace, path, request.kind, [prdPath, ...designPaths])) return { kind: 'reject', feedback: 'Coding file access is limited to the assigned workspace and exact read-only attachments.' }
           }
           return { kind: 'approve-once' }
         },
@@ -128,6 +144,7 @@ export class CodingWorker {
           } finally { progressWaiter?.resume() }
         },
       }
+      const sessionConfig = agent.configure(baseSessionConfig)
       if (!selfTestOnly) {
         client = new CopilotClient({ workingDirectory: workspace, baseDirectory: sessionDirectory, gitHubToken: token, useLoggedInUser: false, env: executionEnvironment() })
         const opened = await openTaskSession(client, this.store, task.id, sessionDirectory, sessionConfig, !!guidance, allowNewSession)
@@ -156,7 +173,7 @@ export class CodingWorker {
       const sendWithModel = async (options: Parameters<NonNullable<typeof activeSession>['send']>[0], timeout: number) => {
         if (!activeSession) throw new Error('编码会话不存在')
         const modelTurn = new ModelTurn(this.store, task.id, initialModel, activeSession)
-        progressWaiter = new SessionProgressWaiter(activeSession)
+        progressWaiter = new SessionProgressWaiter(agent.session({ send: activeSession.send.bind(activeSession), on: activeSession.on.bind(activeSession) }))
         const limits = modelTimeouts(timeout)
         const stage = this.store.get(task.id)?.status
         const label = stage === 'CODING' ? '编码执行' : stage === 'SELF_TEST' ? intent === 'execute' ? '已有用例只读评审' : '生成用例与验收评审' : intent === 'execute' ? '已有用例执行计划' : '测试执行与修正'
@@ -173,6 +190,7 @@ export class CodingWorker {
       let sourceIdentity = ''
       const phaseNames = { baseline: '提取验收基线', generation: '生成或修正用例批次', review: '独立用例质量评审', browser: '独立浏览器规划' }
       const sendPhase = async (options: Parameters<NonNullable<typeof activeSession>['send']>[0], timeout: number, phase: SelfTestArtifact['phase'], scope: string, identity: string, refs: string[], validate?: (content: string) => NonNullable<SelfTestArtifact['output']>, allowedExisting: string[] = [], label = phaseNames[phase]) => {
+        const phaseAgent = agent.forRole(phase === 'generation' ? 'test-authoring' : phase === 'review' ? 'test-review' : phase === 'browser' ? 'browser-planning' : 'test-planning')
         const model = this.store.get(task.id)?.modelId || defaultModel()
         const artifact = await artifacts.start(phase, scope, identity, refs, model)
         const directory = join(sessionDirectory, 'self-test', artifact.id)
@@ -182,22 +200,29 @@ export class CodingWorker {
         const writtenFiles = new Set<string>()
         let usageObserver: ModelUsageObserver | undefined
         try {
-          phaseSession = await phaseClient.createSession({ ...sessionConfig, model, onPermissionRequest: async (request) => {
+          phaseSession = await phaseClient.createSession(phaseAgent.configure({ ...baseSessionConfig, model,
+            ...(phase === 'generation' ? {} : { availableTools: ['view', 'glob', 'grep', 'ask_user'] }),
+            onPermissionRequest: async (request) => {
             if ('managedApprovalRequired' in request && request.managedApprovalRequired) return { kind: 'user-not-available' }
-            if (request.kind === 'read') return { kind: 'approve-once' }
+            if (request.kind === 'read') {
+              const path = request.path
+              if (!request.requestSandboxBypass && typeof path === 'string' && await agentFileAccess(workspace, path, 'read', [prdPath, ...designPaths])
+                && !(phase === 'review' && /\.(?:test|spec)\.[a-z0-9]+$/i.test(path))) return { kind: 'approve-once' }
+              return { kind: 'reject', feedback: 'Stage reads are limited to assigned sources; review cannot read test scripts.' }
+            }
             if (phase === 'generation' && request.kind === 'write' && !request.requestSandboxBypass && await canWriteTestFile(workspace, request.resolvedPath || request.fileName, [...allowedExisting, ...writtenFiles])) {
               writtenFiles.add(request.resolvedPath || request.fileName)
               return { kind: 'approve-once' }
             }
             return { kind: 'reject', feedback: '独立自测阶段禁止执行命令；只有生成阶段可编写测试文件，其他阶段只读' }
-          } })
+          } }))
           if (!phaseSession.sessionId) throw new Error('SDK 未返回独立阶段会话 ID')
           await artifacts.bindSession(artifact.id, phaseSession.sessionId)
           usageObserver = attachModelUsage(phaseSession, (observation) => this.store.recordUsage(task.id, { ...observation, body: { ...observation.body } }), () => ({ taskId: task.id, turnId: this.store.get(task.id)?.modelTurn?.id, artifactId: artifact.id, model: this.store.get(task.id)?.activeModelId || model, phase }))
           trackSession(phaseSession)
           this.store.entry(task.id, 'info', `${phaseNames[phase]}：独立会话 ${phaseSession.sessionId}；产物 ${artifact.id}`)
           const limits = modelTimeouts(timeout)
-          progressWaiter = new SessionProgressWaiter(phaseSession)
+          progressWaiter = new SessionProgressWaiter(phaseAgent.session({ send: phaseSession.send.bind(phaseSession), on: phaseSession.on.bind(phaseSession) }))
           const turn = new ModelTurn(this.store, task.id, model, phaseSession)
           const decisions = JSON.stringify(this.store.get(task.id)?.confirmedDecisions || [])
           const response = await turn.send((report) => progressWaiter!.send({ ...options, prompt: appendSerializedDecisionSuffix(options.prompt, decisions) }, limits, report), label, limits)
@@ -581,6 +606,7 @@ export class CodingWorker {
               cases[index] = { ...testCase, status: run.status === 'passed' ? 'passed' : run.status === 'blocked' ? 'manual' : 'failed', startedAt: run.startedAt, finishedAt: run.finishedAt, output: run.output }
               if (cases[index].status === 'passed') cases[index].evidenceInputFingerprint = evidenceIdentity(cases[index], executionSnapshot)
             } catch (error) {
+              agentFailed = true
               if (error instanceof TaskStorageError) throw error
               planningSelfTest = false
               const message = error instanceof Error ? error.message : String(error)
@@ -618,8 +644,13 @@ export class CodingWorker {
         const summary = executionSummary(cases, executionPlan)
         const allPassed = (selection ? customReady(this.store.get(task.id)?.executionAssessment) : this.store.get(task.id)?.acceptanceAssessment?.status === 'qualified') && summary.qualified && checks.every((check) => check.passed)
         if (summary.advisoryFailed || summary.advisoryUnverified) this.store.entry(task.id, 'warning', `补充验证：失败 ${summary.advisoryFailed} 条，未验证 ${summary.advisoryUnverified} 条（其中按需未选中 ${summary.notSelected} 条）；不计为通过，不阻断必验结论`)
+        if (allPassed) {
+          await agent.record('completed')
+          agentCompleted = true
+        }
         this.store.status(task.id, allPassed ? 'SUCCESS' : 'REVIEW', allPassed ? selection ? `按用户选择范围验收通过；未选中项不计为通过，默认门禁结果仍保留${this.store.get(task.id)?.executionAssessment?.status === 'rejected' ? '；覆盖或质量警告仍保留，不表示全量质量通过' : ''}` : '必验用例及工程检查通过，编码完成；补充验证结果单独保留' : '必验用例或工程检查未通过，或缺少必验项，请查看证据并决定是否继续修复')
       } catch (error) {
+        agentFailed = true
         if (error instanceof TaskStorageError) throw error
         planningSelfTest = false
         const message = error instanceof Error ? error.message : String(error)
@@ -635,6 +666,7 @@ export class CodingWorker {
         this.store.status(task.id, 'REVIEW', `自测清单未能生成或执行：${message}`)
       }
     } catch (error) {
+      agentFailed = true
       try { await this.store.flush() }
       catch {
         console.error('任务持久化失败，停止当前任务；请恢复存储后重启后台')
@@ -663,6 +695,8 @@ export class CodingWorker {
       if (session) await session.abort().catch(() => {})
     } finally {
       this.pending.delete(task.id)
+      try { if (agentFailed || !agentCompleted) await agent.record(agentFailed ? 'failed' : 'completed') }
+      catch { console.error('Agent execution audit could not be saved; check task storage.') }
       try { await this.store.flush() }
       catch { console.error('任务结束时未能落库，请恢复存储后重启后台') }
       if (session) await session.disconnect().catch(() => {})

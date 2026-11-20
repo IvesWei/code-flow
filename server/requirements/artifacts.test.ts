@@ -9,6 +9,8 @@ import { chromium } from 'playwright-core'
 import type { RequirementProject, RequirementRevision } from '../../shared/requirements.js'
 import { exportRequirementRevision, validatePrototypeRevision } from './artifacts.js'
 import { validatePrototypeDesign } from './prototype-design.js'
+import { renderSourceReconstruction, sourceReconstructionInput } from './source-reconstruction.js'
+import { readSourceFile } from './sources.js'
 
 function fixture() {
   const revision: RequirementRevision = {
@@ -19,6 +21,30 @@ function fixture() {
   const project: RequirementProject = { schemaVersion: 1, id: '11111111-1111-4111-8111-111111111111', ownerId: 1, version: 1, title: 'Project', description: '', modelId: 'test', createdAt: revision.createdAt, updatedAt: revision.createdAt, status: 'draft', sources: [{ id: 'S1', name: 'Source', kind: 'file', sha256: 'abc', sizeBytes: 3 }], evidence: [{ sourceId: 'S1', summary: 'Read source', limitations: 'Example only' }], questions: [], decisions: [{ question: { id: 'Q1', priority: 'P1', text: 'Which view?', impact: 'Layout', choices: ['Overview'], recommendation: 'Overview' }, answer: 'Overview', at: revision.createdAt }], revisions: [revision], jobs: [], events: [] }
   return { project, revision }
 }
+
+test('pre-change source evidence excludes the target design and saves only mapped, visible originals as separate PNGs', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'requirement-before-'))
+  try {
+    const { project, revision } = fixture()
+    project.sources[0].name = 'existing-project-code.md'
+    project.title = 'TARGET_ONLY'
+    revision.screens[0].html = '<main>TARGET_ONLY</main>'
+    revision.capturePlan = { version: 1, fingerprint: 'f'.repeat(64), blocks: [{ blockId: 'B1', kind: 'existing', reason: 'TARGET_ONLY' }], sourceFallback: { code: 'PAGE_CAPTURE_TARGET', blocks: [{ blockId: 'B1', fields: ['Original field'], content: [] }] } }
+    const input = sourceReconstructionInput(project, revision)
+    assert.doesNotMatch(JSON.stringify(input), /TARGET_ONLY|Inspect the screen/)
+    const result = { prototypes: [{ id: 'EDITOR', title: 'Original', mode: 'incremental' as const, sourceAnchor: { route: '/editor', layout: 'Layout.tsx', pageFile: 'Editor.tsx' }, html: '<!doctype html><html><body><main data-requirement-id="SOURCE-1" data-acceptance-id="OBS-1">Original field</main></body></html>', states: [{ id: 'OLD', name: 'Existing', requirementIds: ['SOURCE-1'], acceptanceIds: ['OBS-1'], changes: [] }] }] }
+    const signal = new AbortController().signal
+    const [replica] = await renderSourceReconstruction(input, revision, result, root, signal)
+    assert.equal(replica.blockId, 'B1')
+    assert.equal((await readSourceFile(root, project.ownerId, project.id, replica.image)).buffer.readUInt32BE(16), 1600)
+    assert.equal(revision.existingPages, undefined)
+    assert.equal(revision.screenshots, undefined)
+    result.prototypes[0].html = result.prototypes[0].html.replace('Original field', 'Something else<span hidden>Original field</span>')
+    await assert.rejects(renderSourceReconstruction(input, revision, result, root, signal), /SOURCE_RECONSTRUCTION/)
+    result.prototypes[0].html = result.prototypes[0].html.replace('<span hidden>', '<span style="position:absolute;top:1400px">')
+    await assert.rejects(renderSourceReconstruction(input, revision, result, root, signal), /SOURCE_RECONSTRUCTION/)
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
 
 test('Markdown is deterministic, structured, traceable and explicitly a discussion draft', async () => {
   const { project, revision } = fixture()
@@ -47,6 +73,53 @@ test('module names and field lists survive Markdown and Word export', async () =
   const { unzipSync, strFromU8 } = await import('fflate')
   const xml = strFromU8(unzipSync(word.buffer)['word/document.xml'])
   for (const text of ['Case management', 'Case name', 'Keyword matching', 'Case type', 'Filter by type']) assert.ok(xml.includes(text), text)
+})
+
+test('PRD-only Word requires screenshots and never silently falls back to a text-only export', async () => {
+  const { project, revision } = fixture()
+  await assert.rejects(exportRequirementRevision(project, revision, 'docx', 'not-used', 'prd'), /缺少完整的原型截图/)
+  await assert.rejects(exportRequirementRevision(project, { ...revision, screens: [] }, 'docx', 'not-used', 'prd'), /缺少完整的原型截图/)
+  await assert.rejects(exportRequirementRevision(project, revision, 'md', 'not-used', 'prd'), /Unsupported PRD export/)
+  assert.ok((await exportRequirementRevision(project, revision, 'docx', 'not-used')).buffer.length)
+})
+
+test('PRD-only Word embeds every selected-revision state screenshot and omits process records', { timeout: 90_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), 'requirement-prd-export-'))
+  try {
+    const { project, revision } = fixture()
+    revision.prd.blocks[0].module = 'Case management'
+    revision.prd.requirements[0].scenario = 'Inspect the default and empty views'
+    revision.prd.requirements[0].fields = [{ name: 'Case name', description: 'Keyword matching' }]
+    revision.screens.push({ ...revision.screens[0], id: '44444444-4444-4444-8444-444444444444', state: 'empty', html: '<main data-requirement-id="R1"><h1 data-acceptance-id="A1">Empty overview</h1><p>HTML_SOURCE_SENTINEL</p></main>' })
+    const captured = await validatePrototypeRevision(project, revision, root)
+    assert.deepEqual(captured.validation.errors, [])
+    assert.equal(captured.screenshots!.length, 2)
+    const latest = { ...structuredClone(revision), id: '55555555-5555-4555-8555-555555555555', prd: { ...revision.prd, summary: 'LATEST_REVISION_SENTINEL' } }
+    project.revisions = [captured, latest]
+    const before = structuredClone(project)
+    const document = await exportRequirementRevision(project, captured, 'docx', root, 'prd')
+    assert.equal(document.filename, `prd-${project.id}-${captured.id}.docx`)
+    assert.equal(document.contentType, 'application/vnd.openxmlformats-officedocument.wordprocessingml.document')
+    const { unzipSync, strFromU8 } = await import('fflate')
+    const entries = unzipSync(document.buffer)
+    const xml = strFromU8(entries['word/document.xml'])
+    for (const text of ['A deterministic specification', '模块：Case management', '功能名称：Inspect', '对应场景：Inspect the default and empty views', '功能描述：', 'Inspect the screen', '包含以下字段', 'Case name', 'Keyword matching', '设计稿：Overview · default', '设计稿：Overview · empty', '页面说明：Scope', 'Name：Pipe | cell', 'Value：&lt;unsafe&gt;']) assert.ok(xml.includes(text), text)
+    assert.ok(xml.indexOf('功能名称：Inspect') < xml.indexOf('设计稿：Overview · default') && xml.indexOf('设计稿：Overview · empty') < xml.indexOf('页面说明：Scope'))
+    assert.doesNotMatch(xml, /<w:tbl>|Visible content|对应原型截图|对应需求：|Provenance appendix|Sources|Evidence|Decisions|Validation|Project:|Revision:|Read source|Which view|Q1|HTML_SOURCE_SENTINEL|LATEST_REVISION_SENTINEL/)
+    const footers = Object.entries(entries).filter(([name]) => /^word\/footer\d+\.xml$/.test(name)).map(([, bytes]) => strFromU8(bytes)).join('')
+    assert.match(footers, /Discussion draft/)
+    assert.match(footers, /interactions are not verified/)
+    const media = Object.entries(entries).filter(([name]) => name.startsWith('word/media/') && name.endsWith('.png')).map(([, bytes]) => Buffer.from(bytes))
+    assert.equal(media.length, captured.screens.length)
+    for (const screenshot of captured.screenshots!) assert.ok(media.some(image => createHash('sha256').update(image).digest('hex') === screenshot.sha256))
+    assert.deepEqual(project, before)
+    for (const requirementIds of [[], ['UNKNOWN'], ['R1', 'UNKNOWN']]) await assert.rejects(exportRequirementRevision(project, { ...captured, screens: captured.screens.map((screen, index) => index ? screen : { ...screen, requirementIds }) }, 'docx', root, 'prd'), /未关联有效功能/)
+    await assert.rejects(exportRequirementRevision(project, { ...captured, screenshots: captured.screenshots!.slice(0, 1) }, 'docx', root, 'prd'), /缺少完整的原型截图/)
+    await assert.rejects(exportRequirementRevision(project, { ...captured, screenshots: captured.screenshots!.map(screenshot => ({ ...screenshot, sha256: 'bad' })) }, 'docx', root, 'prd'), /integrity/)
+    await assert.rejects(exportRequirementRevision(project, { ...captured, screenshots: captured.screenshots!.map(screenshot => ({ ...screenshot, storageKey: screenshot.storageKey.replace(captured.id, latest.id) })) }, 'docx', root, 'prd'), /ownership/)
+    await rm(join(root, captured.screenshots![0].storageKey))
+    await assert.rejects(exportRequirementRevision(project, captured, 'docx', root, 'prd'), /ENOENT/)
+  } finally { await rm(root, { recursive: true, force: true }) }
 })
 
 test('HTML uses per-screen opaque sandbox, escaped text and a no-network policy without executable source', async () => {
@@ -137,6 +210,28 @@ test('isolated Chromium captures desktop-only evidence without requiring mobile 
   } finally { await rm(root, { recursive: true, force: true }) }
 })
 
+test('scriptless native controls pass static validation without certifying interactions', { timeout: 90_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), 'requirement-static-controls-'))
+  try {
+    const { project, revision } = fixture()
+    const screen = revision.screens[0]
+    Object.assign(revision, validatePrototypeDesign([{
+      id: 'PAGE', title: screen.title,
+      html: `<!doctype html><html><body>${screen.html}<label>Reason<textarea>Keep the task</textarea></label><button type="button">Finish</button></body></html>`,
+      states: [{ id: screen.id, name: screen.state, requirementIds: screen.requirementIds, acceptanceIds: screen.acceptanceIds, changes: [] }],
+    }], revision.prd))
+    const result = await validatePrototypeRevision(project, revision, root)
+    assert.deepEqual(result.validation.errors, [])
+    assert.equal(result.validation.allScreensValidated, true)
+    assert.equal(result.validation.interactionVerified, false)
+    const [check] = result.validation.screens
+    assert.equal(check.visual, 'passed')
+    assert.equal(check.interaction, 'not_verified')
+    assert.deepEqual(check.interactionErrors, [])
+    assert.deepEqual(result.screenshots?.map((shot) => shot.screenId), [screen.id])
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
 test('scripts never execute or reach a local canary; static visuals and unverified interactions remain distinct', { timeout: 90_000 }, async () => {
   let requests = 0
   const server = createServer((_request, response) => { requests++; response.end('unexpected') })
@@ -152,9 +247,11 @@ test('scripts never execute or reach a local canary; static visuals and unverifi
     assert.equal(result.validation.screens[0].visual, 'passed')
     assert.equal(result.validation.screens[0].interaction, 'not_verified')
     assert.equal(result.validation.allScreensValidated, false)
-    assert.match(result.validation.errors.join('\n'), /Interaction not verified/)
+    assert.deepEqual(result.validation.screens[0].interactionErrors, [])
+    assert.match(result.validation.errors.join('\n'), /Unsafe prototype source: script elements and event handlers/)
     revision.screens[0].html = `<main data-requirement-id="R1"><h1 data-acceptance-id="A1">Visible</h1><div style="width:2000px">Overflow</div><img src="http://127.0.0.1:${address.port}/image"></main>`
     const broken = await validatePrototypeRevision(project, revision, root)
+    assert.match(broken.validation.errors.join('\n'), /Unsafe prototype source: resource attributes/)
     assert.match(broken.validation.errors.join('\n'), /Horizontal geometry overflow/)
     assert.match(broken.validation.errors.join('\n'), /Broken or blocked image/)
     assert.equal(requests, 0)
@@ -204,4 +301,42 @@ test('ZIP retains one shared source plus declarative states and refuses a drifte
   assert.equal(JSON.parse(strFromU8(entries['manifest.json'])).screens[0].prototypeId, 'PAGE')
   revision.screens[0].html += '<p>Independent drift</p>'
   await assert.rejects(exportRequirementRevision(project, revision, 'zip', 'not-used'), /shared prototype/)
+})
+
+test('targeted scrollTo, element and fullPage capture modes validate off-fold and dialog regions cleanly', { timeout: 90_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), 'requirement-targeted-capture-'))
+  try {
+    const { project, revision } = fixture()
+    revision.screens = [
+      {
+        id: '33333333-3333-4333-8333-333333333333', title: 'Lower fold', state: 'scroll',
+        capture: { mode: 'viewport', scrollTo: '#target-fold' },
+        requirementIds: ['R1'], acceptanceIds: ['A1'],
+        html: '<!doctype html><html><body style="margin:0"><div style="height:1300px;background:#eef4f0">Header</div><section id="target-fold" data-requirement-id="R1" data-acceptance-id="A1" style="height:260px;background:#1d5c3f;color:#fff;padding:24px">Lower section visible after scrollTo</section></body></html>',
+      },
+      {
+        id: '44444444-4444-4444-8444-444444444444', title: 'Modal close-up', state: 'element',
+        capture: { mode: 'element', selector: '#impact-modal', padding: 8 },
+        requirementIds: ['R1'], acceptanceIds: ['A1'],
+        html: '<!doctype html><html><body style="margin:0;background:#dde5e0;padding:120px"><div id="impact-modal" data-requirement-id="R1" data-acceptance-id="A1" style="width:520px;height:260px;background:#ffffff;border:2px solid #1d5c3f;padding:24px;color:#182321">Impact dialog close-up</div></body></html>',
+      },
+      {
+        id: '55555555-5555-4555-8555-555555555555', title: 'Long report', state: 'fullPage',
+        capture: { mode: 'fullPage' },
+        requirementIds: ['R1'], acceptanceIds: ['A1'],
+        html: '<!doctype html><html><body style="margin:0"><div style="height:1250px;background:#f4f7f5">Top</div><footer data-requirement-id="R1" data-acceptance-id="A1" style="height:240px;background:#244c3c;color:#fff;padding:24px">Bottom report</footer></body></html>',
+      },
+    ]
+    const validated = await validatePrototypeRevision(project, revision, root)
+    assert.deepEqual(validated.validation.errors, [])
+    assert.equal(validated.validation.allScreensValidated, true)
+    assert.equal(validated.screenshots?.length, 3)
+    const elementPng = await readFile(join(root, validated.screenshots![1].storageKey))
+    assert.ok(elementPng.readUInt32BE(16) < 1600 && elementPng.readUInt32BE(16) >= 520)
+    const fullPng = await readFile(join(root, validated.screenshots![2].storageKey))
+    assert.equal(fullPng.readUInt32BE(16), 1600)
+    assert.ok(fullPng.readUInt32BE(20) >= 1490)
+    const exported = await exportRequirementRevision(project, validated, 'docx', root, 'prd')
+    assert.ok(exported.buffer.length > 0)
+  } finally { await rm(root, { recursive: true, force: true }) }
 })

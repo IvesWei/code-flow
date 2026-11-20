@@ -1,13 +1,20 @@
 import { randomUUID } from 'node:crypto'
-import { link, mkdir, open, readdir, rename, unlink, writeFile } from 'node:fs/promises'
+import { appendFile, link, mkdir, open, readdir, realpath, rename, unlink, writeFile } from 'node:fs/promises'
+import { createInterface } from 'node:readline'
 import { join, resolve } from 'node:path'
-import type { RequirementProject, RequirementRepository } from '../../shared/requirements.js'
+import type { RequirementConversationEntry, RequirementPrdAudit, RequirementProject, RequirementRepository } from '../../shared/requirements.js'
 import { requirementPreviewOrigin, requirementPreviewPath } from '../../shared/requirement-preview.js'
 import { assertPrototypeSources } from './prototype-design.js'
+import { validateCapturePlan, validateScopeCheckpoint } from './capture-plan.js'
+import { validatePrototypeCapture, validateQuestions, validateSourceAnchors } from './validation.js'
+import { validatePrdTemplate } from '../../shared/prd-template.js'
+import { readBusinessReview } from '../../shared/business-review.js'
+import { validateRemoteCodeInput } from './remote-code.js'
 
 export type { RequirementRepository } from '../../shared/requirements.js'
 export const REQUIREMENT_LIST_LIMIT = 100
 export const REQUIREMENT_BODY_LIMIT = 8 * 1024 * 1024
+export const REQUIREMENT_CONVERSATION_BODY_LIMIT = 16 * 1024 * 1024
 export interface RequirementSqlPool {
   query(options: { sql: string; timeout: number }, values?: unknown[]): Promise<unknown[]>
 }
@@ -37,6 +44,16 @@ function identifier(value: unknown): asserts value is string { requireValue(type
 function timestamp(value: unknown): asserts value is string {
   requireValue(typeof value === 'string' && value.length === 24 && Number.isFinite(Date.parse(value)) && new Date(value).toISOString() === value)
 }
+function conversationBody(entry: RequirementConversationEntry): string {
+  identifier(entry.conversationId); timestamp(entry.createdAt)
+  requireValue(Number.isSafeInteger(entry.sequence) && entry.sequence > 0 && Number.isSafeInteger(entry.requestIndex) && entry.requestIndex >= 0)
+  requireValue(typeof entry.kind === 'string' && /^[a-z][a-z_.]{0,63}$/.test(entry.kind))
+  if (entry.sdkSessionId !== undefined) requireValue(typeof entry.sdkSessionId === 'string' && entry.sdkSessionId.length <= 128)
+  object(entry.body)
+  const body = JSON.stringify(entry.body)
+  requireValue(Buffer.byteLength(body) <= REQUIREMENT_CONVERSATION_BODY_LIMIT)
+  return body
+}
 function object(value: unknown): asserts value is Row {
   requireValue(value !== null && typeof value === 'object' && !Array.isArray(value))
 }
@@ -45,6 +62,9 @@ function strings(value: unknown): asserts value is string[] { requireValue(Array
 function question(value: unknown): void {
   object(value); text(value.id); text(value.text); text(value.impact); text(value.recommendation); strings(value.choices)
   requireValue(['P0', 'P1', 'P2'].includes(String(value.priority)))
+  if (value.capture !== undefined) {
+    try { validateQuestions([value]) } catch { throw new RequirementContractError() }
+  }
 }
 function validate(value: unknown): asserts value is RequirementProject {
   object(value); identifier(value.id); positive(value.ownerId); positive(value.version)
@@ -53,9 +73,33 @@ function validate(value: unknown): asserts value is RequirementProject {
   for (const field of ['title', 'description', 'modelId']) text(value[field])
   for (const field of ['sources', 'evidence', 'questions', 'decisions', 'revisions', 'jobs', 'events']) requireValue(Array.isArray(value[field]))
   const project = value as unknown as RequirementProject
+  if (project.remoteCodeConfig !== undefined) {
+    try { validateRemoteCodeInput(project.remoteCodeConfig) } catch { throw new RequirementContractError() }
+  }
+  if (project.prototypeConversations !== undefined) {
+    requireValue(Array.isArray(project.prototypeConversations) && project.prototypeConversations.length <= 500)
+    const prototypes = new Set<string>(), conversations = new Set<string>(), sessions = new Set<string>()
+    for (const binding of project.prototypeConversations) {
+      object(binding)
+      requireValue(Object.keys(binding).every(key => ['prototypeId', 'conversationId', 'sdkSessionId', 'modelId', 'contextFingerprint', 'prototypeFingerprint', 'skillFingerprint'].includes(key)))
+      requireValue(typeof binding.prototypeId === 'string' && /^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$/.test(binding.prototypeId))
+      identifier(binding.conversationId); identifier(binding.sdkSessionId); text(binding.modelId)
+      requireValue(binding.modelId.length > 0 && binding.modelId.length <= 120)
+      requireValue(!prototypes.has(binding.prototypeId) && !conversations.has(binding.conversationId) && !sessions.has(binding.sdkSessionId))
+      prototypes.add(binding.prototypeId); conversations.add(binding.conversationId); sessions.add(binding.sdkSessionId)
+      for (const fingerprint of [binding.contextFingerprint, binding.prototypeFingerprint, binding.skillFingerprint]) {
+        if (fingerprint !== undefined) requireValue(typeof fingerprint === 'string' && /^[a-f0-9]{64}$/.test(fingerprint))
+      }
+    }
+  }
   if (project.preview !== undefined) {
     object(project.preview); positive(project.preview.generation)
     try { requireValue(requirementPreviewOrigin(project.preview.origin) === project.preview.origin) } catch { throw new RequirementContractError() }
+    if (project.preview.entryPaths !== undefined) {
+      strings(project.preview.entryPaths)
+      requireValue(project.preview.entryPaths.length <= 12 && new Set(project.preview.entryPaths).size === project.preview.entryPaths.length)
+      try { project.preview.entryPaths.forEach(path => requireValue(requirementPreviewPath(path) === path)) } catch { throw new RequirementContractError() }
+    }
   }
   for (const source of project.sources) {
     object(source); text(source.id); text(source.name)
@@ -65,11 +109,30 @@ function validate(value: unknown): asserts value is RequirementProject {
     if (source.url !== undefined) text(source.url)
   }
   for (const item of project.evidence) { object(item); text(item.sourceId); text(item.summary); text(item.limitations) }
+  if (project.sourceAnchors !== undefined) {
+    try { validateSourceAnchors(project.sourceAnchors, project.sources) } catch { throw new RequirementContractError() }
+  }
+  if (project.stageState !== undefined) {
+    object(project.stageState)
+    requireValue(Object.keys(project.stageState).every(key => ['analysisFingerprint', 'prdInputFingerprint', 'prdRevisionId', 'prdClarificationJobId'].includes(key)))
+    for (const fingerprint of [project.stageState.analysisFingerprint, project.stageState.prdInputFingerprint]) {
+      if (fingerprint !== undefined) requireValue(typeof fingerprint === 'string' && /^[a-f0-9]{64}$/.test(fingerprint))
+    }
+    for (const stageId of [project.stageState.prdRevisionId, project.stageState.prdClarificationJobId]) {
+      if (stageId !== undefined) requireValue(typeof stageId === 'string' && stageId.length > 0 && stageId.length <= 120)
+    }
+  }
   project.questions.forEach(question)
+  if (project.scopeCheckpoint !== undefined) {
+    try { validateScopeCheckpoint(project.scopeCheckpoint, project.sources.map(source => source.id)) } catch { throw new RequirementContractError() }
+  }
   for (const item of project.decisions) { object(item); question(item.question); text(item.answer); timestamp(item.at) }
   for (const revision of project.revisions) {
     object(revision); text(revision.id); timestamp(revision.createdAt); object(revision.prd)
     text(revision.prd.title); text(revision.prd.summary)
+    if (revision.prd.templateVersion !== undefined) {
+      try { validatePrdTemplate(revision.prd) } catch { throw new RequirementContractError() }
+    }
     requireValue(Array.isArray(revision.prd.blocks) && Array.isArray(revision.prd.requirements) && Array.isArray(revision.screens))
     for (const block of revision.prd.blocks) {
       object(block); text(block.id); text(block.title); text(block.content); strings(block.requirementIds); strings(block.sourceIds)
@@ -77,14 +140,34 @@ function validate(value: unknown): asserts value is RequirementProject {
     }
     for (const requirement of revision.prd.requirements) {
       object(requirement); text(requirement.id); text(requirement.title); text(requirement.description); strings(requirement.sourceIds)
+      if (requirement.capability !== undefined) text(requirement.capability)
       requireValue(Array.isArray(requirement.acceptance))
       for (const item of requirement.acceptance) { object(item); text(item.id); text(item.text) }
       if (requirement.nonVisualReason !== undefined) text(requirement.nonVisualReason)
     }
-    for (const screen of revision.screens) { object(screen); text(screen.id); text(screen.title); text(screen.state); text(screen.html); strings(screen.requirementIds); strings(screen.acceptanceIds) }
+    for (const screen of revision.screens) {
+      object(screen); text(screen.id); text(screen.title); text(screen.state); text(screen.html); strings(screen.requirementIds); strings(screen.acceptanceIds)
+      if (screen.proves !== undefined) text(screen.proves)
+      if (screen.capture !== undefined) {
+        try { validatePrototypeCapture(screen.capture) } catch { throw new RequirementContractError() }
+      }
+    }
     try { assertPrototypeSources(revision) } catch { throw new RequirementContractError() }
+    if (revision.businessReview !== undefined) {
+      try {
+        const { revisionId, ...body } = revision.businessReview
+        requireValue(revision.prd.templateVersion === 2 && revision.id === revisionId)
+        readBusinessReview(body, revision.prd, revision.screens)
+      } catch { throw new RequirementContractError() }
+    }
     if (revision.confirmedAt !== undefined) timestamp(revision.confirmedAt)
     if (revision.designConfirmedAt !== undefined) timestamp(revision.designConfirmedAt)
+    if (revision.capturePlan !== undefined) {
+      try { validateCapturePlan(revision.capturePlan, revision.prd, revision.existingPages) } catch { throw new RequirementContractError() }
+      for (const { image } of revision.capturePlan.sourceFallback?.images ?? []) {
+        requireValue(image.storageKey === `requirements/sources/${project.ownerId}/${project.id}/${image.id}.png` && !project.sources.some(source => source.id === image.id))
+      }
+    }
     if (revision.screenshots !== undefined) {
       requireValue(Array.isArray(revision.screenshots))
       for (const item of revision.screenshots) { object(item); text(item.screenId); text(item.storageKey); requireValue(typeof item.sha256 === 'string' && /^[a-f0-9]{64}$/.test(item.sha256)) }
@@ -94,6 +177,7 @@ function validate(value: unknown): asserts value is RequirementProject {
       requireValue(Array.isArray(revision.existingPages) && revision.existingPages.length <= 12)
       for (const page of revision.existingPages) {
         object(page); text(page.blockId); timestamp(page.capturedAt); text(page.structure)
+        if (page.viewId !== undefined) requireValue(typeof page.viewId === 'string' && /^[A-Za-z0-9_-]{1,120}$/.test(page.viewId))
         try { requirementPreviewPath(page.path) } catch { throw new RequirementContractError() }
         requireValue(/^[a-f0-9]{64}$/.test(page.fingerprint))
         object(page.image); text(page.image.id); text(page.image.storageKey); requireValue(page.image.kind === 'file' && /^[a-f0-9]{64}$/.test(page.image.sha256))
@@ -102,7 +186,10 @@ function validate(value: unknown): asserts value is RequirementProject {
   }
   for (const job of project.jobs) {
     object(job); text(job.id); timestamp(job.startedAt)
-    requireValue(['analyze', 'prd', 'design', 'validate'].includes(job.stage) && ['running', 'succeeded', 'failed', 'cancelled', 'interrupted'].includes(job.status))
+    requireValue(['analyze', 'prd', 'design', 'validate', 'reconstruct', 'business-review'].includes(job.stage) && ['running', 'succeeded', 'failed', 'cancelled', 'interrupted'].includes(job.status))
+    if (job.stage === 'reconstruct') requireValue(project.revisions.some(revision => revision.id === job.revisionId && revision.capturePlan?.sourceFallback))
+    else if (job.stage === 'business-review') requireValue(project.revisions.some(revision => revision.id === job.revisionId && revision.prd.templateVersion === 2))
+    else requireValue(job.revisionId === undefined)
     if (job.endedAt !== undefined) timestamp(job.endedAt)
     if (job.error !== undefined) text(job.error)
     if (job.interaction !== undefined) {
@@ -177,7 +264,7 @@ function interrupted(project: RequirementProject): RequirementProject | undefine
   if (project.status !== 'running' && !project.jobs.some(job => job.status === 'running')) return
   const at = new Date(Math.max(Date.now(), Date.parse(project.updatedAt), ...project.jobs.filter(job => job.status === 'running').map(job => Date.parse(job.startedAt)))).toISOString()
   return {
-    ...project, version: project.version + 1, updatedAt: at, status: 'interrupted',
+    ...project, version: project.version + 1, updatedAt: at, status: project.jobs.some(job => job.status === 'running' && ['reconstruct', 'business-review'].includes(job.stage)) ? project.status : 'interrupted',
     jobs: project.jobs.map(job => {
       if (job.status !== 'running') return job
       const { interaction: _interaction, ...rest } = job
@@ -267,6 +354,52 @@ export class JsonRequirementRepository implements RequirementRepository {
       }
     })
   }
+  async appendConversation(ownerId: number, projectId: string, jobId: string, entry: RequirementConversationEntry): Promise<void> {
+    positive(ownerId); identifier(projectId); identifier(jobId)
+    conversationBody(entry)
+    await this.locked(async () => {
+      const project = await this.read(projectId)
+      requireValue(project?.ownerId === ownerId && project.jobs.some(job => job.id === jobId))
+      const directory = resolve(this.directory, '..', 'conversations', projectId, jobId)
+      await mkdir(directory, { recursive: true })
+      await appendFile(join(directory, `${entry.conversationId}.jsonl`), `${JSON.stringify(entry)}\n`, { mode: 0o600 })
+    })
+  }
+  async readPrdAudit(ownerId: number, projectId: string, jobId: string): Promise<RequirementPrdAudit | undefined> {
+    identifier(projectId); identifier(jobId); positive(ownerId)
+    const project = await this.get(projectId, ownerId)
+    if (!project?.jobs.some(job => job.id === jobId && job.stage === 'prd')) return
+    return storage(async () => {
+      const directory = resolve(this.directory, '..', 'conversations', projectId, jobId)
+      let files
+      try { files = await readdir(directory, { withFileTypes: true }) }
+      catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return; throw error }
+      if (await realpath(directory) !== directory || files.length > 32) return
+      let latest = '', result: RequirementPrdAudit | undefined
+      for (const file of files) {
+        if (!file.isFile() || !file.name.endsWith('.jsonl') || !uuid.test(file.name.slice(0, -6))) continue
+        const handle = await open(join(directory, file.name), 'r')
+        try {
+          const stat = await handle.stat()
+          if (!stat.isFile() || stat.nlink !== 1 || stat.size > 128 * 1024 * 1024) continue
+          const lines = createInterface({ input: handle.createReadStream({ autoClose: false }), crlfDelay: Infinity })
+          let start: Row | undefined, prompt: string | undefined
+          try { for await (const line of lines) {
+            const entry = JSON.parse(line) as RequirementConversationEntry
+            if (entry.conversationId !== file.name.slice(0, -6)) break
+            if (entry.kind === 'prd.checkpoint' && entry.createdAt >= latest) { latest = entry.createdAt; result = { checkpoint: entry.body }; continue }
+            if (entry.kind === 'session.start') { if (entry.body.stage !== 'prd') break; if (entry.body.purpose === 'prd-authoring') start = entry.body }
+            if (!start) continue
+            if (entry.kind === 'request' && entry.requestIndex === 1 && typeof entry.body.prompt === 'string') prompt = entry.body.prompt
+            if (!result?.checkpoint && prompt && entry.kind === 'assistant.message' && typeof entry.body.content === 'string' && entry.body.content.trim() && entry.createdAt >= latest) {
+              latest = entry.createdAt; result = { legacy: { start, prompt, candidate: entry.body.content } }
+            }
+          } } finally { lines.close() }
+        } finally { await handle.close() }
+      }
+      return result
+    })
+  }
 }
 
 const columns = 'id, owner_id, version, status, created_at, updated_at, body'
@@ -291,7 +424,10 @@ function fromRow(row: Row): RequirementProject {
 export class MysqlRequirementRepository implements RequirementRepository {
   constructor(private readonly pool: RequirementSqlPool) {}
   async verify(): Promise<void> {
-    await storage(async () => { await rows(this.pool, `SELECT ${columns} FROM codeflow_requirement_projects LIMIT 0`) })
+    await storage(async () => {
+      await rows(this.pool, `SELECT ${columns} FROM codeflow_requirement_projects LIMIT 0`)
+      await rows(this.pool, 'SELECT owner_id, project_id, job_id, conversation_id, sdk_session_id, sequence, request_index, created_at, kind, body FROM codeflow_requirement_conversation_events LIMIT 0')
+    })
   }
   async list(ownerId: number): Promise<RequirementProject[]> {
     positive(ownerId)
@@ -335,6 +471,35 @@ export class MysqlRequirementRepository implements RequirementRepository {
           cursor = previous.id
         }
       }
+    })
+  }
+  async appendConversation(ownerId: number, projectId: string, jobId: string, entry: RequirementConversationEntry): Promise<void> {
+    positive(ownerId); identifier(projectId); identifier(jobId)
+    const body = conversationBody(entry)
+    await storage(async () => {
+      const result = await query(this.pool,
+        `INSERT INTO codeflow_requirement_conversation_events
+          (owner_id, project_id, job_id, conversation_id, sdk_session_id, sequence, request_index, created_at, kind, body)
+         SELECT ?, id, ?, ?, ?, ?, ?, ?, ?, ? FROM codeflow_requirement_projects
+         WHERE id = ? AND owner_id = ? AND JSON_CONTAINS(JSON_EXTRACT(body, '$.jobs[*].id'), JSON_QUOTE(?)) = 1`,
+        [ownerId, jobId, entry.conversationId, entry.sdkSessionId ?? null, entry.sequence, entry.requestIndex, entry.createdAt, entry.kind, body, projectId, ownerId, jobId]) as { affectedRows?: number }
+      if (result.affectedRows !== 1) throw new RequirementStorageUnavailableError()
+    })
+  }
+  async readPrdAudit(ownerId: number, projectId: string, jobId: string): Promise<RequirementPrdAudit | undefined> {
+    identifier(projectId); identifier(jobId); positive(ownerId)
+    return storage(async () => {
+      const scope = 'FROM codeflow_requirement_conversation_events WHERE owner_id = ? AND project_id = ? AND job_id = ?'
+      const ids = [ownerId, projectId, jobId]
+      const [row] = await rows(this.pool, `SELECT conversation_id, kind, body ${scope} AND (kind = 'prd.checkpoint' OR (kind = 'session.start' AND JSON_UNQUOTE(JSON_EXTRACT(body, '$.purpose')) = 'prd-authoring')) ORDER BY created_at DESC, sequence DESC LIMIT 1`, ids)
+      if (!row) return
+      const body = typeof row.body === 'string' || Buffer.isBuffer(row.body) ? JSON.parse(String(row.body)) : row.body
+      object(body)
+      if (row.kind === 'prd.checkpoint') return { checkpoint: body }
+      const conversation = [...ids, row.conversation_id], filter = `${scope} AND conversation_id = ?`
+      const [request] = await rows(this.pool, `SELECT JSON_UNQUOTE(JSON_EXTRACT(body, '$.prompt')) AS prompt ${filter} AND kind = 'request' AND request_index = 1 ORDER BY sequence LIMIT 1`, conversation)
+      const [message] = await rows(this.pool, `SELECT JSON_UNQUOTE(JSON_EXTRACT(body, '$.content')) AS content ${filter} AND kind = 'assistant.message' AND CHAR_LENGTH(JSON_UNQUOTE(JSON_EXTRACT(body, '$.content'))) > 0 ORDER BY sequence DESC LIMIT 1`, conversation)
+      if (typeof request?.prompt === 'string' && typeof message?.content === 'string') return { legacy: { start: body, prompt: request.prompt, candidate: message.content } }
     })
   }
 }

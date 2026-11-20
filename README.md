@@ -43,6 +43,8 @@ Vite 不监听默认 `data` 目录、自定义 `DATA_DIR`、后端源码、文�
 
 ## 工程结构
 
+当前系统分层、模块关系、业务流程和受控 Agent 边界见 [HTML 架构图](docs/architecture.html)，可直接用浏览器离线打开，也可打印为 PDF。每次架构变更须在同一变更中更新该图及核对日期；维护规则见 [AGENTS.md](AGENTS.md)，一致性与浏览器检查命令为 `node --import tsx --test server/tests/ui/architecture.test.ts`。
+
 前端按业务功能组织：`src/main.tsx` 为浏览器入口，`src/app` 管理路由与导航，`src/features` 按认证、编码、测试和自动化分组，`src/components` 存放共享控件，`src/styles` 管理全局样式。完整目录和依赖约定见 [docs/frontend-organization.md](docs/frontend-organization.md)，SPA 路由与部署说明见 [docs/frontend-routing.md](docs/frontend-routing.md)。
 
 服务端按功能模块组织，启动入口保留在 `server/index.ts`：`security` 管理认证与访问控制，`tasks` 管理任务状态，`execution` 管理 Copilot 执行与会话，`verification` 管理验收与自动化，`git` 管理仓库与发布，`storage` 管理持久化，`http` 管理 HTTP 中间件。单模块测试与源码同目录，跨模块和 UI 测试分别放在 `server/tests/integration`、`server/tests/ui`；`npm test` 递归发现全部服务端测试。

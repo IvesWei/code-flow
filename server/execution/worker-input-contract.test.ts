@@ -7,10 +7,11 @@ import { basename, join } from 'node:path'
 import { CopilotClient, type ResumeSessionConfig, type SessionConfig, type SessionEvent } from '@github/copilot-sdk'
 import { chromium } from 'playwright-core'
 import type { AcceptanceRequirement, CodingTask, SelfTestCase } from '../../shared/task.js'
-import { TaskStore } from '../tasks/store.js'
+import { TaskStorageError, TaskStore } from '../tasks/store.js'
 import { CodingWorker } from './worker.js'
 import { browserPlanInstructions, browserProtocolVersion } from '../verification/browser-automation.js'
 import { caseInputs, fileFingerprint, fingerprint, SelfTestArtifacts, workspaceFingerprint } from '../verification/self-test-artifacts.js'
+import type { AgentRole } from '../agents/profiles.js'
 
 type SendOptions = Parameters<Awaited<ReturnType<CopilotClient['createSession']>>['send']>[0]
 const at = '2026-10-15T00:00:00.000Z'
@@ -112,10 +113,13 @@ function assertRequest(actual: SendOptions, prompt: string, paths: string[]) {
   for (const key of ['storageKey', 'sha256', 'sizeBytes', 'inputFingerprint', 'inputRefs', 'artifactId', 'rulesVersion', 'sessionId']) assert.ok(!serialized.includes(`"${key}":`), key)
 }
 
-function assertConfig(config: SessionConfig | ResumeSessionConfig, workspace: string, resumed = false) {
+function assertConfig(config: SessionConfig | ResumeSessionConfig, workspace: string, resumed = false, role: AgentRole = 'coding') {
   assert.deepEqual(Object.keys(config).sort(), [
-    'gitHubToken', 'hooks', 'model', 'onPermissionRequest', 'onUserInputRequest', 'streaming', 'workingDirectory', ...(resumed ? ['continuePendingWork'] : []),
+    'gitHubToken', 'hooks', 'model', 'onPermissionRequest', 'onUserInputRequest', 'streaming', 'workingDirectory', 'systemMessage',
+    ...(resumed ? ['continuePendingWork'] : []), ...(role === 'coding' || role === 'test-authoring' ? [] : ['availableTools']),
   ].sort())
+  assert.ok(config.systemMessage && 'content' in config.systemMessage && config.systemMessage.content?.includes(`PLATFORM AGENT ROLE: ${role}.`))
+  if (role !== 'coding' && role !== 'test-authoring') assert.deepEqual(config.availableTools, ['view', 'glob', 'grep', 'ask_user'])
   assert.equal(config.model, 'contract-model')
   assert.equal(config.streaming, true)
   assert.equal(config.gitHubToken, 'fake-contract-token')
@@ -160,6 +164,9 @@ for (const mode of ['fresh', 'resume', 'explicit-create'] as const) {
     assert.equal(sdk.requests.length, 1)
     assertRequest(sdk.requests[0].options, expected, [setup.prd, ...setup.designs])
     assert.equal(setup.store.get(task.id)?.error, stopMessage)
+    const audit = setup.store.get(task.id)!.entries.filter(entry => entry.text.startsWith('agent:'))
+    assert.equal(JSON.parse(audit.at(-1)!.text.slice(6)).kind, 'failed')
+    assert.ok(!audit.some(entry => JSON.parse(entry.text.slice(6)).kind === 'completed'))
     assert.deepEqual(sdk.disconnected, [sdk.opens[0].id])
     assert.equal(sdk.stops, 1)
     assert.equal(setup.worker.isRunning(task.id), false)
@@ -183,7 +190,7 @@ for (const guidance of [undefined, '补充\r\n说明  ']) {
     assertRequest(sdk.requests[0].options, oldSuffix(expected, task), [setup.prd, ...setup.designs])
     assert.equal(sdk.opens.length, 1)
     assert.equal(sdk.opens[0].kind, 'create')
-    assertConfig(sdk.opens[0].config, setup.workspace)
+    assertConfig(sdk.opens[0].config, setup.workspace, false, 'test-planning')
     assert.match(setup.store.get(task.id)?.selfTestError || '', /contract fixture stops after capture/)
     assert.equal(setup.store.get(task.id)?.copilotSession?.id, 'original-coding-session')
     assert.deepEqual(sdk.disconnected, [sdk.opens[0].id])
@@ -233,11 +240,11 @@ for (const mode of ['default', 'custom'] as const) {
     }
     assert.equal(sdk.opens.length, 3)
     assert.equal(new Set(sdk.requests.map((request) => request.sessionId)).size, 3)
-    for (const opened of sdk.opens) {
+    for (const [index, opened] of sdk.opens.entries()) {
       assert.equal(opened.kind, 'create')
-      assertConfig(opened.config, setup.workspace)
-      assert.deepEqual(await opened.config.onPermissionRequest!({ kind: 'read' }, { sessionId: opened.id }), { kind: 'approve-once' })
-      assert.deepEqual(await opened.config.onPermissionRequest!({ kind: 'shell', fullCommandText: 'echo forbidden' }, { sessionId: opened.id }), { kind: 'reject', feedback: '独立自测阶段禁止执行命令；只有生成阶段可编写测试文件，其他阶段只读' })
+      assertConfig(opened.config, setup.workspace, false, index === 0 ? 'test-review' : 'browser-planning')
+      assert.deepEqual(await opened.config.onPermissionRequest!({ kind: 'read', path: 'README.md' }, { sessionId: opened.id }), { kind: 'approve-once' })
+      assert.equal((await opened.config.onPermissionRequest!({ kind: 'shell', fullCommandText: 'echo forbidden' }, { sessionId: opened.id })).kind, 'reject')
     }
     assert.deepEqual(sdk.disconnected, sdk.opens.map((opened) => opened.id))
     assert.equal(sdk.stops, 3)
@@ -260,7 +267,7 @@ for (const mode of ['default', 'custom'] as const) {
   })
 }
 
-for (const scenario of ['warnings-pass', 'warnings-fail', 'checks-fail', 'conflict', 'unsafe', 'undeterminable', 'no-runner', 'missing-file', 'unsafe-file', 'unsafe-url', 'post-review-error', 'missing-expected', 'malformed-review'] as const) {
+for (const scenario of ['warnings-pass', 'audit-failure', 'warnings-fail', 'checks-fail', 'conflict', 'unsafe', 'undeterminable', 'no-runner', 'missing-file', 'unsafe-file', 'unsafe-url', 'post-review-error', 'missing-expected', 'malformed-review'] as const) {
   test(`custom readiness executes existing definitions only: ${scenario}`, async (context) => {
     const selected: SelfTestCase = { ...definition, status: 'pending', testFile: 'save.test.cjs', requirementIds: ['REQ-unknown'] }
     if (scenario === 'no-runner') delete selected.testFile
@@ -278,7 +285,7 @@ for (const scenario of ['warnings-pass', 'warnings-fail', 'checks-fail', 'confli
     })
     writeFileSync(join(setup.workspace, 'save.test.cjs'), `const {test}=require('node:test'); const assert=require('node:assert/strict'); test('stored data',()=>{const records=new Map(); records.set('item','saved'); assert.equal(records.get('item'),'${scenario === 'warnings-fail' ? 'wrong' : 'saved'}')})`)
     writeFileSync(join(setup.workspace, 'package.json'), '{"scripts":{"test":"node --test"}}')
-    if (scenario === 'warnings-pass') {
+    if (scenario === 'warnings-pass' || scenario === 'audit-failure') {
       const legacyIdentity = fingerprint({ files: await fileFingerprint([setup.prd, ...setup.designs]), instruction: setup.store.get('contract')!.instruction, decisions, rules: 'isolated-self-test-v1' })
       const legacyArtifacts = new SelfTestArtifacts(setup.store, 'contract')
       const imported = await legacyArtifacts.start('baseline', 'baseline', legacyIdentity, [legacyIdentity], 'legacy-import')
@@ -300,6 +307,17 @@ for (const scenario of ['warnings-pass', 'warnings-fail', 'checks-fail', 'confli
         return status(...args)
       })
     }
+    if (scenario === 'audit-failure') {
+      const entry = setup.store.entry.bind(setup.store)
+      context.mock.method(setup.store, 'entry', (...args: Parameters<TaskStore['entry']>) => {
+        if (args[2].startsWith('agent:') && JSON.parse(args[2].slice(6)).kind === 'completed') {
+          assert.notEqual(setup.store.get('contract')!.status, 'SUCCESS')
+          throw new TaskStorageError(new Error('fixture completion audit write failure'))
+        }
+        return entry(...args)
+      })
+      context.mock.method(console, 'error', () => {})
+    }
     const execute = () => setup.worker.execute(setup.store.get('contract')!, setup.prd, setup.designs, 'fake-contract-token', undefined, true, false, [], 'execute')
     await execute()
     let result = setup.store.get('contract')!
@@ -309,6 +327,16 @@ for (const scenario of ['warnings-pass', 'warnings-fail', 'checks-fail', 'confli
     assert.equal(result.executionAssessment?.readiness, scenario === 'malformed-review' ? 'unknown' : blocked ? 'blocked' : 'ready')
     assert.equal(result.executionAssessment?.status, 'rejected', 'warnings must never become strict quality approval')
     assert.equal(result.status, scenario === 'warnings-pass' ? 'SUCCESS' : 'REVIEW')
+    if (scenario === 'audit-failure') {
+      assert.match(result.selfTestError!, /保存失败/)
+      assert.equal(result.selfTests?.[0].status, 'passed', 'completed execution evidence must be preserved')
+      const audit = result.entries.filter(entry => entry.text.startsWith('agent:'))
+      assert.equal(JSON.parse(audit.at(-1)!.text.slice(6)).kind, 'failed')
+      assert.ok(!audit.some(entry => JSON.parse(entry.text.slice(6)).kind === 'completed'))
+      assert.equal(setup.worker.isRunning('contract'), false)
+      assert.equal(sdk.stops, 1)
+      return
+    }
     assert.deepEqual(result.acceptanceAssessment, defaultAssessment)
     assert.equal(result.selfTestPlanningStatus, scenario === 'malformed-review' ? 'reviewing' : 'rejected')
     assert.equal(result.selfTests?.[1].status, 'manual', 'unselected case must not execute')
@@ -332,7 +360,7 @@ for (const scenario of ['warnings-pass', 'warnings-fail', 'checks-fail', 'confli
     assert.ok(result.selfTests?.[0].output?.includes('stored data'))
     assert.match(result.executionAssessment!.inputFingerprint!, /^[a-f0-9]{64}$/)
     if (scenario !== 'warnings-pass') return
-    assert.match(result.entries.at(-1)!.text, /覆盖或质量警告仍保留/)
+    assert.match(result.entries.findLast(entry => !entry.text.startsWith('agent:'))!.text, /覆盖或质量警告仍保留/)
     const identity = result.executionAssessment!.inputFingerprint
     await execute()
     result = setup.store.get('contract')!

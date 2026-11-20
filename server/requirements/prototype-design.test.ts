@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { assertPrototypeSources, validatePrototypeDesign } from './prototype-design.js'
 import { prototypeScreens } from '../../shared/requirement-prototypes.js'
+import { dualPrdFixture } from '../tests/fixtures/dual-prd.js'
 import type { StructuredPrd } from '../../shared/requirements.js'
 
 const prd: StructuredPrd = { title: 'Plans', summary: 'Create plan', blocks: [{ id: 'B1', title: 'Plans', content: 'Create', sourceIds: [], requirementIds: ['R1'] }], requirements: [{ id: 'R1', title: 'Create', description: 'Create plan', sourceIds: [], acceptance: [{ id: 'A1', text: 'Created' }] }] }
@@ -28,6 +29,18 @@ test('state changes cannot override styles, inject markup, duplicate nodes or ta
   assert.match(escaped.screens[0].html, /&lt;img/)
   assert.doesNotMatch(escaped.screens[0].html, /<img/)
 })
+test('state node markers require eligible HTML elements while unmarked static SVG remains allowed', () => {
+  const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="120" height="20"><rect width="100" height="20" fill="#123456"></rect></svg>'
+  const valid = { ...prototype, html: prototype.html.replace('</main>', `<div data-prototype-node="chart">${svg}</div></main>`) }
+  assert.ok(validatePrototypeDesign([valid], prd).screens.every(screen => screen.html.includes('<svg')))
+  for (const html of [
+    prototype.html.replace('<style>', '<style data-prototype-node="palette">'),
+    prototype.html.replace('<html>', '<html data-prototype-node="document">'),
+    prototype.html.replace('</main>', `${svg.replace('<svg ', '<svg data-prototype-node="chart" ')}</main>`),
+    prototype.html.replace('</main>', `${svg.replace('<rect ', '<rect data-prototype-node="bar" ')}</main>`),
+  ]) assert.throws(() => validatePrototypeDesign([{ ...prototype, html }], prd), /invalid prototype node element/)
+})
+
 test('derived HTML and state ownership cannot drift from the stored source', () => {
   const design = validatePrototypeDesign([prototype], prd)
   const revision = { id: 'V1', createdAt: '', prd, ...design }
@@ -51,4 +64,45 @@ test('one page can render states with different requirement mappings without cop
   assert.throws(() => validatePrototypeDesign([prototype, { ...prototype, id: 'DUPLICATE' }], prd))
   assert.throws(() => validatePrototypeDesign([{ ...prototype, html: prototype.html.replace('</body>', '<script>alert(1)</script></body>') }], prd))
   assert.throws(() => validatePrototypeDesign([{ ...prototype, states: [{ ...prototype.states[0], changes: [{ node: 'name', value: 'secret' }] }], html: prototype.html.replace('<input', '<input type="password"') }], prd))
+})
+
+test('incremental mode requires sourceAnchor and preserves per-state proves and targeted capture metadata', () => {
+  assert.throws(() => validatePrototypeDesign([{ ...prototype, mode: 'incremental' }], prd), /sourceAnchor/)
+  assert.throws(() => validatePrototypeDesign([{ ...prototype, states: [{ ...prototype.states[0], capture: { mode: 'element' } }] }], prd), /selector/)
+  const valid = validatePrototypeDesign([{
+    ...prototype,
+    mode: 'incremental',
+    sourceAnchor: { route: '/plans', layout: 'src/layouts/BaseLayout.tsx', pageFile: 'src/pages/Plans/index.tsx' },
+    states: prototype.states.map((state, index) => ({
+      ...state,
+      proves: `State ${index + 1} proof`,
+      ...(index === 0 ? { capture: { mode: 'viewport', scrollTo: '[data-prototype-node="dialog"]' } } : {}),
+    })),
+  }], prd)
+  assert.equal(valid.prototypes[0].mode, 'incremental')
+  assert.equal(valid.screens[0].proves, 'State 1 proof')
+  assert.deepEqual(valid.screens[0].capture, { mode: 'viewport', scrollTo: '[data-prototype-node="dialog"]' })
+  assert.doesNotThrow(() => assertPrototypeSources({ id: 'V2', createdAt: '', prd, ...valid }))
+})
+
+test('dual-template FR/AC specification codes normalize to canonical requirement and acceptance IDs and reject empty visual prototypes', () => {
+  const dual = dualPrdFixture(prd)
+  assert.throws(() => validatePrototypeDesign([], dual), /empty prototypes array/)
+  const nonVisual: StructuredPrd = { ...prd, requirements: [{ ...prd.requirements[0], nonVisualReason: 'Backend batch rule with no UI surface' }] }
+  assert.deepEqual(validatePrototypeDesign([], nonVisual), { prototypes: [], screens: [] })
+
+  const aliased = validatePrototypeDesign([{
+    id: 'PAGE-1',
+    title: '计划列表页',
+    mode: 'redesign',
+    html: '<!doctype html><html><head><style>main{padding:24px}</style></head><body><main data-requirement-id="FR-01" data-acceptance-id="AC-01"><p data-prototype-node="status">正常</p></main></body></html>',
+    states: [{ id: 'STATE-1', name: '默认态', proves: '展示默认状态', requirementIds: ['FR-01'], acceptanceIds: ['AC-01'], changes: [] }],
+  }], dual)
+  assert.deepEqual(aliased.prototypes[0].states[0].requirementIds, ['R1'])
+  assert.deepEqual(aliased.prototypes[0].states[0].acceptanceIds, ['A1'])
+  assert.match(aliased.prototypes[0].html, /data-requirement-id="R1"/)
+  assert.match(aliased.prototypes[0].html, /data-acceptance-id="A1"/)
+  assert.match(aliased.screens[0].html, /data-requirement-id="R1"/)
+  assert.match(aliased.screens[0].html, /data-acceptance-id="A1"/)
+  assert.doesNotThrow(() => assertPrototypeSources({ id: 'V-DUAL', createdAt: '', prd: dual, ...aliased }))
 })

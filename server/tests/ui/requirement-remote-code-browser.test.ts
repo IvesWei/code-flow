@@ -97,6 +97,8 @@ test('remote repository form: exact JSON, CAS retry, busy/abort, local uploads a
       return reply({ error: 'Unexpected fixture request' }, 400)
     })
     await page.goto(`${origin}/requirements/${projectId}`, { waitUntil: 'networkidle' })
+    await page.getByText('补充文件与链接', { exact: true }).click()
+    await page.getByText('添加已有项目代码', { exact: true }).click()
     const form = page.getByRole('form', { name: '远程仓库代码', exact: true })
     const repository = form.getByLabel('仓库地址', { exact: true })
     const branch = form.getByLabel('分支（可选）', { exact: true })
@@ -149,13 +151,11 @@ test('remote repository form: exact JSON, CAS retry, busy/abort, local uploads a
       assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true)
       await page.screenshot({ path: join(temporary, `remote-code-${width}.png`), fullPage: true })
       const version = project.version
-      const reads = detailReads
       await submit.focus(); await page.keyboard.press('Enter')
       await expect(repository).toHaveValue('')
       await expect(branch).toHaveValue('')
       await expect(directory).toHaveValue('')
       assert.deepEqual(writes.at(-1), { repository: repositories[index], branch: 'feature/远程代码', directory: `packages/${'最长中文模块目录'.repeat(8)}/src`, version })
-      assert.equal(detailReads, reads + 1)
       await expect(local.getByRole('status')).toHaveText('候选 1 个文件 · 已排除 0 个文件')
       await expect(localInput).not.toHaveValue('')
       await expect(page.getByText('代码快照（只读）', { exact: false })).toBeVisible()
@@ -170,12 +170,12 @@ test('remote repository form: exact JSON, CAS retry, busy/abort, local uploads a
     outcome = 'conflict'; hold()
     await submit.click()
     await expect.poll(() => writes.length).toBe(writesBeforeConflict + 1)
-    await expect(form).toHaveAttribute('aria-busy', 'true')
+    await expect(form.locator('fieldset')).toHaveAttribute('aria-busy', 'true')
     for (const control of [repository, branch, directory, submit, localInput, localSubmit, local.getByRole('button', { name: '取消选择' }), page.getByLabel('补充文件'), page.getByRole('button', { name: '分析需求', exact: true })]) await expect(control).toBeDisabled()
     await form.evaluate(element => { if (element instanceof HTMLFormElement) { element.requestSubmit(); element.requestSubmit() } })
     assert.equal(writes.length, writesBeforeConflict + 1)
     releaseRequest()
-    await expect(page.getByRole('alert')).toContainText('版本冲突')
+    await expect(page.getByRole('alert').first()).toContainText('版本冲突')
     await expect(submit).toBeEnabled()
     await expect(repository).toHaveValue('http://code.sunmi.com/owner/retry.git')
     await expect(branch).toHaveValue('release/fixture')
@@ -194,7 +194,7 @@ test('remote repository form: exact JSON, CAS retry, busy/abort, local uploads a
     await branch.fill('   '); await directory.fill('   ')
     outcome = 'failure'
     await submit.click()
-    await expect(page.getByRole('alert')).toContainText('模拟拉取失败')
+    await expect(page.getByRole('alert').first()).toContainText('模拟拉取失败')
     await expect(repository).toHaveValue('https://github.com/owner/optional.git')
     await expect(branch).toHaveValue('   ')
     await expect(directory).toHaveValue('   ')
@@ -202,7 +202,7 @@ test('remote repository form: exact JSON, CAS retry, busy/abort, local uploads a
     assert.deepEqual(writes.at(-1), { repository: 'https://github.com/owner/optional.git', version: project.version })
     outcome = 'success'; failRefresh = true
     await submit.click()
-    await expect(page.getByRole('alert')).toContainText('模拟刷新失败')
+    await expect(page.getByRole('alert').first()).toContainText('模拟刷新失败')
     await expect(repository).toHaveValue('https://github.com/owner/optional.git')
     await expect(submit).toBeDisabled()
     failRefresh = false
@@ -230,7 +230,7 @@ test('remote repository form: exact JSON, CAS retry, busy/abort, local uploads a
     project.status = 'running'
     outcome = 'failure'
     await submit.click()
-    await expect(page.getByRole('alert')).toContainText('模拟拉取失败')
+    await expect(page.getByRole('alert').first()).toContainText('模拟拉取失败')
     await expect(repository).toBeDisabled()
     await expect(submit).toBeDisabled()
     project.status = 'draft'

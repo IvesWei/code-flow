@@ -1,114 +1,91 @@
 ---
 name: prd-with-ui-design-delivery
-description: '端到端生成或更新产品PRD、关键页面高保真HTML原型、固定视口截图，并把设计稿嵌入Word DOCX后完成内容与视觉交付验证。UI生成阶段强制使用经校验的ui-ux-pro-max设计智能套件，缺失时可按官方方式安装。Use when: 用户要求生成PRD并包含UI设计稿、根据需求和代码制作产品方案与原型、输出带页面截图的Word需求文档、更新PRD及交互设计。涵盖现状取证、需求澄清、权限/状态/数据/异常/验收、ui-ux-pro-max设计检索、HTML原型、Playwright截图、Figma导入和DOCX嵌图。Do not use for: 仅编码实现、只写简短需求摘要、仅做单页视觉稿或只润色现有文字。'
-argument-hint: '提供需求材料、代码范围、目标版本、设计页面范围及期望输出文件名'
+description: '基于需求规则与现有代码回溯，产出关键页面多状态高保真HTML原型、画板契约（ui-manifest.json）和经真实浏览器验证的PNG设计图，支持独立出图或供prd-from-requirements-and-code嵌入PRD。UI生成阶段强制使用经校验的ui-ux-pro-max设计智能套件，缺失时可按官方方式安装。Use when: 用户要求制作页面设计稿、交互原型、多状态UI截图，或在编写含UI设计稿的PRD时联用生成设计图；涵盖源码壳子回溯、ui-ux-pro-max设计检索、HTML原型、Playwright精准截图与Figma导入。Do not use for: 单独编写无UI的纯文本PRD（使用prd-from-requirements-and-code）、直接渲染Word文档或生产业务代码实现。'
+argument-hint: '提供需求或已确认PRD规则、目标代码模块/路由范围、设计页面范围及期望原型目录名'
 user-invocable: true
 disable-model-invocation: false
 ---
 
-# PRD With UI Design Delivery
+# UI Prototype & Design Asset Delivery
 
-将需求原文、代码现状和用户决策收敛为可评审、可实现、可验收的 PRD，同时交付与 PRD 规则一致的关键页面高保真原型、固定视口截图和内嵌设计稿的 Word 文档。
+将已确认的业务规则与代码库真实页面基线转化为**可交互的高保真多状态 HTML 原型、结构化画板契约和像素级验证通过的 PNG 设计图**。
+
+> **职责边界**：本 Skill **专注产出 UI 设计资产（原型、Manifest、设计图）**，不直接编写 PRD 正文，也不生成 Word `.docx` 文档。当用户需要输出 PRD 文档（含带 UI 设计稿的业务评审版与开发规格版 PRD）时，文档编写、图片嵌入与 DOCX 渲染统一由 [prd-from-requirements-and-code](../prd-from-requirements-and-code/SKILL.md) 负责。
 
 ## 交付目标
 
-默认交付以下文件，文件名可由用户覆盖：
+默认交付以下 UI 设计资产（目录名可由用户指定或按主题命名）：
 
 ```text
-docs/<产品>_<版本>_<主题>_PRD.md
-docs/<产品>_<版本>_<主题>_PRD_含UI设计稿.docx
 docs/<主题>-prototype/index.html
 docs/<主题>-prototype/ui-manifest.json
 docs/<主题>-prototype/screenshots/*.png
 ```
 
-只有 Markdown、DOCX、原型和截图均完成对应门禁，才能声称“完整交付”。若用户明确不要某一产物，可跳过并在最终回复说明。
+只有 HTML 原型、`ui-manifest.json` 和 `screenshots/*.png` 全部通过浏览器渲染、像素检视与契约校验门禁，才能声称“UI 设计图完整交付”。
 
-### DOCX 单独优化模式
+### 两种协作模式
 
-当用户只要求优化或重新生成 Word PRD 时，保留已确认的 Markdown 内容和已有 UI 图片，不重复执行需求澄清、代码取证、原型设计与截图阶段。直接执行以下闭环：
-
-1. 检查 Markdown 标题、表格和本地图片引用是否完整。
-2. 优先使用用户提供或仓库已有的企业 `.docx` 模板；没有模板时使用渲染器内置的企业 PRD 版式。
-3. 生成新的 `.docx`，不得覆盖用户正在编辑的文件；默认在文件名增加版本号或“排版优化版”。
-4. 运行 DOCX-only 结构校验；本模式不生成 PDF，也不以 PDF 作为验收依赖。
-5. 本机安装 Microsoft Word 时，可直接打开 DOCX 并执行重新分页与字段更新检查，但不得额外导出 PDF。
+1. **独立出图模式（仅需原型与设计稿）**：
+   - 用户只需要交互原型、页面设计图或状态截图，不需要生成 PRD 文档。
+   - 本 Skill 独立完成：关键交互歧义澄清 → 源码页面基线回溯 → `ui-manifest.json` 定义 → `ui-ux-pro-max` 设计检索 → HTML 原型 → Playwright 精准截图与 `validate_ui.py` 校验。
+   - 此模式下 `ui-manifest.json` 中的 `requirements` 与 `acceptanceCriteria` 为选填。
+2. **PRD 联用供图模式（与 `prd-from-requirements-and-code` 协同）**：
+   - 用户要求生成“含 UI 设计稿的 PRD（Markdown / Word）”。
+   - **单次共享取证与澄清**：与 `prd-from-requirements-and-code` 共享同一次代码回溯和 P0/P1 提问结果，禁止向用户重复提问或二次泛读代码。
+   - **先定规则编号，再出设计图，最后嵌回文档**：先由 `prd-from-requirements-and-code` 收敛功能划分及开发版 `FR-xx` / `AC-xx` 编号 → 再由本 Skill 生成原型与 `screenshots/*.png`（此模式下 `ui-manifest.json` 必须绑定对应的 `requirements` 和 `acceptanceCriteria`）→ 最后交回 `prd-from-requirements-and-code` 写入双版 `■ **设计稿：**` 小节并渲染校验双版 `.docx`。
 
 ## 必要输入
 
-至少需要以下两类材料：
+至少需要以下信息：
 
-- 需求原文、旧 PRD、会议纪要、流程图或原型。
-- 当前代码库或明确的页面、接口、模块范围。
-- 目标版本、上线范围、明确不做事项。
-- 品牌或现有设计系统、关键页面清单、目标视口。
-- 文档标题、状态、日期、评审人等元信息。
+- 需求描述、交互说明、流程图，或上游已收敛的功能/规则清单。
+- 当前代码库范围（存量改造须能定位目标路由、Layout 与页面组件；全新产品说明目标端与品牌偏好）。
+- 需要覆盖的关键页面范围与目标视口（默认桌面 `1600×1000`）。
 
-若缺少会改变数据模型、权限、状态机、跨模块关系或 UI 主流程的信息，必须先澄清；仅缺少可配置参数时可给推荐默认值并放入评审关注项。
+若缺少会改变主界面布局、核心字段显隐、角色按钮权限或阻断交互的关键规则，必须先使用结构化提问工具澄清；联用模式下若上游已完成澄清，直接复用决策账本。
 
 ## 强制原则
 
-1. **证据分层**：明确区分需求原文、代码现状、用户确认和合理推导。
-2. **PRD 与 UI 同源**：页面上的字段、状态、动作、权限和错误提示必须能定位到 PRD 规则或验收标准。
-3. **先规则后画面**：P0 决策未闭合时，只能输出讨论稿和探索性原型，不能标记定稿。
-4. **关键状态成组设计**：不只画默认页面；至少覆盖正常、空、加载、错误、无权限及关键确认/阻断状态中的适用项。
-5. **设计稿必须可验证**：使用固定视口真实渲染并检查像素，不以 HTML 源码存在代替视觉验证。
-6. **Word 是正式交付物**：设计稿以本地 PNG 嵌入 DOCX，不使用外链图片。
-7. **不虚构验证结果**：未执行视觉预览、浏览器检查或 DOCX 校验时必须明确说明。
+1. **规则驱动画面**：页面上的每个字段、状态标签、操作按钮、权限显隐和报错提示都必须有明确业务规则依据；P0 规则未确认时只能输出探索性讨论原型，不得标记定稿。
+2. **存量保真优先**：存量页面局部改动（`mode: "incremental"`）必须严格复用真实路由绑定的 Layout 壳子、菜单树、弹窗承载方式与非改动区结构，禁止凭印象脑补导航外壳、抄错历史原型或用通用审美重排非本期区域。
+3. **关键状态成组设计**：不只画默认正常态；按业务实际成组覆盖列表/表单正常态、新建/编辑弹窗、确认/影响阻断、异步加载/进度、空数据、失败恢复与无权限/只读状态中的适用项。
+4. **设计稿必须精准入镜且经像素验证**：真实渲染并等待字体/图表就绪，按目标位置使用滚动聚焦（`scrollTo`）、元素特写（`element`）或预交互（`actions`），截图后必须逐类看图检查，不以 HTML 源码存在代替视觉验证。
+5. **契约与截图一一对应**：`screenshots/` 目录只保留 `ui-manifest.json` 声明的定稿 PNG，不留存探针图或 `final2.png` 等临时废图。
+6. **不虚构外部交付**：未执行浏览器截图检查或未具备 Figma 画布写入能力时必须如实说明。
 
 ## 标准工作流
 
-### 1. 建立边界与决策账本
+### 1. 确认交互边界与源码页面基线
 
-1. 提取业务目标、角色、对象、主流程、外部系统、成功指标和范围外事项。
-2. 判断旧 PRD 是结构参考还是需要继承的需求基线。
-3. 对问题分级：
-   - P0：数据模型、唯一键、权限、状态机、跨模块关联、快照/实时、迁移。
-   - P1：主要业务规则、异常处理、通知和删除影响。
-   - P2：文案、阈值、批量上限、视觉偏好等可配置参数。
-4. 使用结构化提问工具按 P0、P1、P2 分轮澄清；每题只包含一个决策并给出推荐项。
-5. 记录决策账本。后续 PRD 和 UI 只能使用最新已确认规则。
+1. 若为独立出图模式且存在影响页面主流程、权限或关键状态分支的未决项，使用结构化提问工具一次问清并给出基于代码的推荐项；联用模式直接消费已确认决策账本。
+2. 从目标路由出发，按完整页面定位链路取证，禁止跳过父级壳子只读局部子组件：
+   - **路由与壳子回溯链**：路由配置（如 `src/config/routes.tsx`）→ 绑定的 Layout 组件（明确有无顶栏、侧栏宽度与主题、是否无侧栏路由组）→ 菜单配置（如 `menuSider.tsx`）与当前高亮项。
+   - **页面承载与区块坐标**：确认目标界面是独立路由页还是挂载在列表页之上的全宽弹窗/抽屉（如 `TaskDetail` Modal）→ 页面分栏/Tab → 目标改动区在整页中的纵向位置（首屏或中下屏）、存量字段顺序、样式文件（`.less`）与静态资产（如 `src/assets/*.svg`、`config/fonts/*`）。
+   - **运行态基线采集（可用时优先）**：若本地开发服务已运行或用户提供了可访问环境 URL / 登录态（`storageState`），优先访问真实页面核对计算样式或截取现状基线。
 
-### 2. 定向读取代码现状
+### 2. 定义 UI 画板契约（`ui-manifest.json`）
 
-从最接近目标行为的页面、服务、类型和调用方开始，按最小充分证据读取：
+在编写原型前先创建 `docs/<主题>-prototype/ui-manifest.json`，格式见 [画板清单示例](./assets/ui-manifest.example.json)：
 
-- 菜单、路由、页面入口和按钮权限。
-- 列表、表单、详情、空状态和错误状态。
-- API、类型、主键、关联方式、状态字段。
-- 提交、撤回、删除、通知、快照、历史记录。
-- 邻近测试、接口注释和现有设计系统。
+- 清单级标明 `mode`：
+  - `"incremental"`：存量页面局部改动，**必须**填写 `sourceAnchor`（`route`、`layout`、`pageFile`，指向仓库真实文件）；
+  - `"redesign"`：全新页面或整页重设计。
+- 每个画板必须包含：
+  - 稳定唯一 `id`、`title`、带导出态的 `path`（如 `?screen=list&clean=1`）、纯 PNG 文件名 `file`；
+  - `proves`：一句话说明该画板证明的业务状态与交互规则；
+  - `requirements` / `acceptanceCriteria`：与 PRD Skill 联用时必填（对齐开发规格版 `FR-xx` / `AC-xx`）；独立出图模式选填；
+  - 精准截图参数（按需）：
+    - `captureMode`：`"viewport"`（默认固定视口）、`"element"`（按 `selector` 截取弹窗/局部模块特写，可配 `padding`）或 `"fullPage"`（全页长图）；
+    - `scrollTo`：视口截图前滚动聚焦的目标选择器（用于中下屏区块）；
+    - `waitForSelector` / `waitMs`：异步渲染等待；
+    - `actions`：截图前自动执行的交互序列（`click`、`hover`、`fill`、`select`、`press`、`scroll`、`wait`）。
 
-形成内部证据表：需求域、代码锚点、当前行为、目标差距。代码只能证明现状，不能代替目标决策。
+选择画板时聚焦**本次实际发生界面或状态变化**的关键业务流与阻断/异常态；禁止为“未发生变动的其他模块/任务类型维持原逻辑”单独创建无变更对照画板，也不为细微 hover 拆冗余废图。
 
-### 3. 编写 PRD
+### 3. 执行 UI 设计依赖门禁
 
-按 [PRD 结构与追踪规范](./references/prd-outline.md) 编写 Markdown，至少覆盖：
-
-- 背景、目标、指标、范围和术语。
-- 角色职责、权限矩阵、入口和导航。
-- 对象关系、字段、唯一性、版本和状态机。
-- 主流程、批处理、通知、审计和跨模块关系。
-- 异常边界、非功能需求、埋点、迁移、灰度和风险。
-- 使用 `AC-01` 连续编号的可执行验收标准。
-- UI 页面清单与“页面/状态 → 需求 → AC”的追踪矩阵。
-
-运行内容门禁后再开始高保真 UI。若主流程仍存在 P0 未决项，先回到澄清阶段。
-
-### 4. 定义 UI 画板清单
-
-创建 `ui-manifest.json`，格式见 [画板清单示例](./assets/ui-manifest.example.json)。每个画板必须包含：
-
-- 稳定 `id`、页面标题、URL 或查询参数。
-- 关联需求编号和验收标准。
-- 该画板要证明的业务状态。
-- 截图输出文件名。
-
-选择画板时优先覆盖：核心列表、创建/编辑、关键配置、确认弹窗、影响分析、异步进度、错误/阻断和完成结果。不要为每个轻微交互创建独立画板。
-
-### 5. 执行 UI 设计依赖门禁
-
-生成 UI 前必须确认 `ui-ux-pro-max` 已完整安装。本 Skill 兼容以下布局：
+生成 UI 前确认 `ui-ux-pro-max` 已完整安装，兼容以下布局：
 
 ```text
 # 官方 CLI 生成的项目级 Skill（优先）
@@ -125,198 +102,114 @@ docs/<主题>-prototype/screenshots/*.png
 .github/prompts/ui-ux-pro-max/data/
 ```
 
-依次检查：
-
-1. `SKILL.md` 或兼容的 Prompt 文件存在且可读取。
-2. `scripts/search.py` 存在。
-3. `data/` 至少包含样式、颜色、字体、UX 指南和目标技术栈数据。
-4. Python 3 可运行；该搜索脚本只使用标准库，不需要额外 pip 包。
-
-使用本 Skill 自带的依赖工具检查：
+使用自带依赖工具检查（Windows 中文工作区路径下建议先声明 UTF-8 编码）：
 
 ```powershell
+$env:PYTHONUTF8 = '1'
 py .github/skills/prd-with-ui-design-delivery/scripts/ensure_uiux.py --check
 ```
 
-若返回未安装，使用官方项目地址 [nextlevelbuilder/ui-ux-pro-max-skill](https://github.com/nextlevelbuilder/ui-ux-pro-max-skill) 提供的 GitHub Copilot CLI 安装方式。先预览来源、命令和目标目录，再执行项目级安装：
+若未安装，先 `--dry-run` 预览来源与目标目录并告知用户，再按环境确认策略执行项目级安装：
 
 ```powershell
 py .github/skills/prd-with-ui-design-delivery/scripts/ensure_uiux.py --dry-run
 py .github/skills/prd-with-ui-design-delivery/scripts/ensure_uiux.py --install
 ```
 
-`--dry-run` 只进行本地预览，不调用安装器。`--install` 执行官方推荐的 `npx --yes ui-ux-pro-max-cli@latest init --ai copilot`，不做全局 npm 安装，不修改操作系统。安装来源、命令和落盘路径必须在过程更新中告知用户；若环境策略要求执行第三方安装前确认，则先获得用户确认。安装完成后工具会重新检查 `SKILL.md`/Prompt、`search.py` 和 `data/`，只有完整通过才能进入下一阶段。若发现部分安装，工具会拒绝自动覆盖；应先向用户报告残缺路径，在获得确认后由用户清理或修复，再重新执行安装。
+`--install` 执行官方 `npx --yes ui-ux-pro-max-cli@latest init --ai copilot` 并在完成后复检。发现残缺目录时工具拒绝自动覆盖，须报告路径并经用户确认后再处理。若 `node`、`npx` 或 Python 3 缺失，提示用户安装对应运行时，不得调用系统包管理器；安装失败时停止 UI 生成并如实说明，不得拿通用审美建议冒充检索结果。
 
-若 `node`、`npx` 或 Python 3 缺失，不得自行通过 `winget`、`brew`、`apt` 等系统包管理器安装；应提示用户安装对应运行时。网络、权限或官方 CLI 安装失败时，保留错误输出并停止 UI 阶段；PRD 文本部分可以继续，但不能声称“含 UI 完整交付”。不得把通用审美建议冒充 `ui-ux-pro-max` 结果。
+### 4. 使用 ui-ux-pro-max 建立设计依据
 
-### 6. 使用 ui-ux-pro-max 建立设计依据
+读取检查结果输出的 `instruction_file` 并使用 `search_script` 查询（脱敏关键词，不含私有业务机密）：
 
-读取依赖检查工具输出的 `instruction_file`（新版为 `SKILL.md`，兼容布局为 Prompt）并遵循其查询契约；使用输出的 `search_script` 执行命令，不得硬编码安装目录。查询不得包含未脱敏的私有需求、客户数据或源代码，只使用产品类型、用户、平台、交互和视觉关键词。
+1. **存量页面局部改动（`incremental`）**：冻结现有 Layout 壳子、菜单与非改动区结构；仅对本次新增/变更的局部组件或交互执行单一意图的 `--domain` 与 `--stack` 查询，**严禁用检索建议重排存量非改动区域**。
+2. **已有设计系统的全新页面（`redesign`）**：复用仓库真实 Layout 壳子、字体与品牌 Token，执行 `--domain` 和 `--stack` 查询规划主体内容区。
+3. **新产品或无设计系统**：运行 `--design-system`（指定 `density`、`motion`、`variance`）建立整体视觉规范。
+4. 结果为空或偏题时最多收窄重试一次；与仓库现有技术栈/品牌规范冲突时以仓库规范为准。
 
-执行规则：
+### 5. 编写高保真多状态 HTML 原型
 
-1. **已有成熟产品设计系统**：先读取现有页面和设计 Token，再使用 `ui-ux-pro-max` 做一个明确的 UX 领域查询和一个目标栈查询；结果只用于补充，不覆盖现有品牌规范。
-2. **新产品或缺少设计系统**：必须运行 `--design-system`，生成整体视觉方向、颜色、字体、密度、效果和反模式；根据产品类型设置 density、motion 和 variance。
-3. **复杂交互**：针对表单校验、可访问性、数据表格、异步任务、图表或响应式问题追加单一意图的 `--domain` 查询。
-4. **实现栈已知**：运行一次 `--stack <stack>` 获取实现约束。结果与仓库现有框架冲突时，以仓库版本和设计系统为准。
-5. 对查询结果核验领域、首条结果和适用平台；结果为空或偏题时只允许收窄重试一次。
+按 [UI 设计与交互规范](./references/ui-design-standards.md) 编写 `docs/<主题>-prototype/index.html`：
 
-Windows 示例：
+1. 默认桌面视口 `1600×1000`（用户另有指定或需补充移动端 `390×844` 除外）。
+2. 直接复用仓库真实静态资产（如 SVG Logo、本地字体）与对应 `.less` 色值/圆角/边框样式。
+3. 通过 `?screen=<id>` 切换各业务状态画板；`clean=1` 参数必须隐藏所有画板切换栏和调试浮层。
+4. 使用真实业务术语、字段与状态数据，禁止 `Lorem Ipsum` 占位文案。
+5. 异步流程体现进度与失败恢复；危险或阻断操作在主操作附近明确展示原因与影响范围。
+6. 若需在单屏同时呈现顶部步骤条与中下部多张记录卡，合理控制容器内边距避免内层滚动把关键上下文挤出视口；遮罩弹窗使用 `element` 特写时建议 `padding: 0` 防止边缘漏出底层阴影。
 
-```powershell
-$uiux = py .github/skills/prd-with-ui-design-delivery/scripts/ensure_uiux.py --check | ConvertFrom-Json
+### 6. 启动静态服务、精准截图与像素自检
 
-# 新产品或无现成设计系统
-py $uiux.search_script `
-  "enterprise test management dense desktop" `
-  --design-system --density 8 --motion 2 --variance 4 -p "TMP"
-
-# 已有系统的特定交互补充
-py $uiux.search_script `
-  "complex form validation error summary" --domain ux
-
-# 技术栈约束
-py $uiux.search_script `
-  "dense data table modal form" --stack react
-```
-
-将经核验的结论整理为内部设计依据：产品类型、目标用户、平台、视觉方向、颜色/字体、信息密度、核心交互、可访问性要求和明确反模式。不要把搜索结果原文大段复制进 PRD。
-
-### 7. 设计高保真 HTML 原型
-
-原型优先复用仓库现有字体、颜色、间距、组件和导航模式，并结合已经核验的 `ui-ux-pro-max` 结果；无现有系统时以 `--design-system` 输出为设计起点，再按 [UI 设计与交互规范](./references/ui-design-standards.md) 收敛为可实现方案。
-
-要求：
-
-1. 默认桌面视口为 1600×1000，除非用户另有要求。
-2. 每个画板可通过独立 URL 或 `?screen=<id>` 打开。
-3. 提供 `clean=1` 等导出模式，隐藏原型导航、调试面板和说明控件。
-4. 页面展示真实业务字段、状态和操作，不用无意义占位文案。
-5. 异步流程展示进度、离开后恢复、失败阶段和重试入口。
-6. 危险操作展示影响范围、阻断原因和后续处理。
-7. 不把功能说明文字当作 UI 主体；复杂规则放在可展开帮助或 PRD 中。
-8. Figma 官方 VS Code 扩展若无画布写入能力，不得声称已生成 Figma 文件；可通过 HTML-to-design 类插件导入经过验证的 URL。
-
-### 8. 启动服务并截图验证
-
-若原型引用仓库资源，从能覆盖这些资源的共同根目录启动静态服务，避免图片越出服务根：
+从能覆盖原型及所引用仓库静态资源的共同根目录启动 HTTP 服务：
 
 ```powershell
 npx --yes http-server . -p 4173 -c-1
 ```
 
-使用 [截图工具](./scripts/capture_ui.py) 根据 manifest 批量截图：
+运行 [截图工具](./scripts/capture_ui.py) 批量渲染出图（支持 `--strict-overflow`，若截需登录的本地真实服务可传 `--storage-state`）：
 
 ```powershell
 py .github/skills/prd-with-ui-design-delivery/scripts/capture_ui.py `
   --manifest docs/<主题>-prototype/ui-manifest.json `
   --base-url http://127.0.0.1:4173 `
   --output-dir docs/<主题>-prototype/screenshots `
-  --width 1600 --height 1000
+  --strict-overflow
 ```
 
-截图必须使用独立 Playwright CLI，不使用 VS Code 集成浏览器截图桥接。检查每张 PNG 的实际尺寸，并人工查看代表性的列表、表单、抽屉/弹窗、流程和阻断页面。重点检查：横向溢出、操作列、分页、按钮、弹窗边缘、长中文、空状态和资源加载。
+截图完成后，**必须使用图片查看工具逐张人工检视生成的 PNG**：确认壳子与真实系统一致、目标改动区域完整入镜无裁切、无横向滚动溢出、字体图标与图表渲染完整、干净态无调试条。发现瑕疵必须修改原型或 manifest 参数后重拍。
 
-### 9. 将设计稿嵌入 PRD
+### 7. 执行 UI 产物校验门禁
 
-在 Markdown 的 UI 章节使用标准图片语法引用本地截图：
-
-```markdown
-## 关键页面设计
-
-### 需求解析
-
-对应：REQ-AI-01、AC-19。
-
-![AI需求解析](case-management-prototype/screenshots/ai-parse.png)
-```
-
-图片路径相对 Markdown 文件解析。使用 [DOCX 渲染器](./scripts/render_prd_with_ui.py)：
+按 [UI 交付质量门禁](./references/quality-gates.md) 检查，并运行纯标准库 [UI 校验工具](./scripts/validate_ui.py)：
 
 ```powershell
-py .github/skills/prd-with-ui-design-delivery/scripts/render_prd_with_ui.py `
-  --input docs/<产品>_<版本>_<主题>_PRD.md `
-  --output docs/<产品>_<版本>_<主题>_PRD_含UI设计稿.docx `
-  --title "<产品> <主题>" `
-  --version "V1.0" `
-  --date "2026-09-21"
-```
-
-存在企业 Word 模板时增加 `--template docs/templates/company-prd-template.docx`。渲染器支持标题、段落、列表、引用、表格、粗体、行内代码和本地 Markdown 图片。图片按版心等比缩放并附带图注。内置版式采用 A4、首封面无页眉、正文页眉页码、自动更新目录、中文字体映射、章节防孤行、一级章节分页、表头跨页重复和表格行防拆分。模板模式继承模板中的主题与结构，并在此基础上应用 PRD 内容样式。
-
-### 10. 执行交付门禁
-
-使用 [交付校验工具](./scripts/validate_delivery.py)：
-
-```powershell
-py .github/skills/prd-with-ui-design-delivery/scripts/validate_delivery.py `
-  --markdown docs/<产品>_<版本>_<主题>_PRD.md `
-  --docx docs/<产品>_<版本>_<主题>_PRD_含UI设计稿.docx `
+# 独立出图模式
+py .github/skills/prd-with-ui-design-delivery/scripts/validate_ui.py `
   --manifest docs/<主题>-prototype/ui-manifest.json `
   --screenshots docs/<主题>-prototype/screenshots `
-  --required "权限矩阵" "异常与边界场景" "验收标准"
+  --prototype docs/<主题>-prototype/index.html
+
+# 与 prd-from-requirements-and-code 联用模式（强制校验需求与 AC 关联元数据）
+py .github/skills/prd-with-ui-design-delivery/scripts/validate_ui.py `
+  --manifest docs/<主题>-prototype/ui-manifest.json `
+  --screenshots docs/<主题>-prototype/screenshots `
+  --prototype docs/<主题>-prototype/index.html `
+  --require-prd-links
 ```
 
-仅交付 DOCX 时省略 `--manifest` 和 `--screenshots`：
-
-```powershell
-py .github/skills/prd-with-ui-design-delivery/scripts/validate_delivery.py `
-  --markdown docs/<产品>_<版本>_<主题>_PRD.md `
-  --docx docs/<产品>_<版本>_<主题>_PRD_排版优化版.docx `
-  --required "权限矩阵" "异常与边界场景" "验收标准"
-```
-
-门禁必须检查：
-
-- Markdown 和 DOCX 可读取且核心章节存在。
-- AC 编号无重复、无断号；manifest 引用的 AC 在 PRD 中存在。
-- manifest 中每张设计稿均存在、尺寸正确且已嵌入 DOCX。
-- DOCX ZIP 包结构有效，正文和表格可检索，内嵌图片数量符合预期。
-- DOCX 使用 A4 页面、标题层级、页眉页脚、自动更新字段和表格跨页规则；封面标题不在正文重复。
-- 文件大小、段落数、表格数和图片数非异常。
-
-默认不生成 PDF。环境允许且用户需要时，优先使用 Microsoft Word 直接打开文档，更新目录并检查分页、宽表、长中文、图片清晰度和空白页；无法进行 Word 原生预览时必须在最终回复披露。
+校验通过后：
+- **独立出图模式**：直接向用户交付原型路径、画板契约与截图清单；
+- **PRD 联用供图模式**：将通过校验的 `ui-manifest.json` 与 `screenshots/*.png` 交由 [prd-from-requirements-and-code](../prd-from-requirements-and-code/SKILL.md) 嵌入双版 PRD 并执行文档及 DOCX 门禁。
 
 ## 工具与依赖
 
 | 工具 | 用途 | 获取方式 |
 |---|---|---|
-| `vscode_askQuestions` | P0/P1 决策澄清 | VS Code 内置工具 |
-| 搜索与文件读取工具 | 代码现状取证 | VS Code 内置工具 |
-| `apply_patch` | 创建或更新 PRD、原型和 Skill 文件 | VS Code 内置工具 |
-| `ui-ux-pro-max` | UI 设计系统、UX、色彩、字体和技术栈检索；UI 阶段强制依赖 | 缺失时由 [依赖工具](./scripts/ensure_uiux.py) 使用官方 `ui-ux-pro-max-cli` 安装 GitHub Copilot 项目 Skill |
-| `python-docx` | DOCX 生成、读取和嵌图 | `py -m pip install python-docx` |
-| Playwright CLI | 固定视口真实截图 | `npx playwright screenshot`，首次可能下载浏览器 |
-| `http-server` | 为原型和资源提供 HTTP 地址 | `npx --yes http-server` |
-| 图片查看工具 | 人工像素检查 | VS Code 内置工具 |
-| Microsoft Word | 可选 DOCX 原生预览、目录更新与分页检查 | 本机应用 |
+| 结构化提问工具 | 独立模式下关键交互分支澄清 | VS Code 内置工具 |
+| 搜索与文件读取工具 | 路由、Layout、组件与样式取证 | VS Code 内置工具 |
+| 文件编辑工具 | 编写 HTML 原型与 `ui-manifest.json` | VS Code 内置工具 |
+| `ui-ux-pro-max` | UI 设计系统、UX 与技术栈检索（强制依赖） | 缺失时由 [ensure_uiux.py](./scripts/ensure_uiux.py) 调用官方 CLI 安装 |
+| Playwright | 独立浏览器渲染、字体就绪等待、预交互与精准截图 | 由 [capture_ui.py](./scripts/capture_ui.py) 通过 `npx --yes -p playwright` 驱动（支持自动回退本机 Chrome/Edge） |
+| `http-server` / Python `http.server` | 为原型和仓库静态资产提供本地 HTTP 服务 | `npx --yes http-server` 或 Python 标准库 |
+| 图片查看工具 | 截图后人工像素级视觉检查 | VS Code 内置工具 |
 
-安装依赖前先检查是否已存在。缺少 Python 依赖时执行：
-
-```powershell
-py -m pip install -r .github/skills/prd-with-ui-design-delivery/requirements.txt
-```
-
-不要为截图向业务项目写入 Playwright 依赖，优先使用 `npx` 临时执行。
+本 Skill 下所有 Python 脚本（`ensure_uiux.py`、`capture_ui.py`、`validate_ui.py`）均只依赖 Python 3 标准库，无需额外安装 pip 包，也不向业务项目的 `package.json` 写入依赖。
 
 ## 停止条件
 
-以下情况不得继续声称定稿：
+以下任一情况成立时，不得声称 UI 设计图已完成定稿交付：
 
-- 存在未确认 P0 决策。
-- UI 交付范围内未安装或未实际使用 `ui-ux-pro-max`。
-- 关键页面没有对应需求或验收标准。
-- 截图失败、尺寸不符、主要内容被裁切或资源加载失败。
-- DOCX 未通过可打开性、ZIP 包结构或内嵌图片校验。
-- 图片仅为外链或本机绝对路径，未真正嵌入 DOCX。
+- 存在影响主界面结构或关键交互的未确认 P0 问题。
+- 未安装或未实际执行 `ui-ux-pro-max` 检索。
+- `incremental` 存量改动未声明真实存在的 `sourceAnchor`，或篡改了真实 Layout 壳子与非改动存量区域。
+- 截图失败、资源加载 4xx/5xx、像素尺寸不符，或目标改动区被首屏裁切。
+- 未对生成的 PNG 执行视觉查看检查，或 `screenshots/` 残留未在 `ui-manifest.json` 注册的临时图片。
 
-## 最终回复
+## 最终回复（独立出图模式）
 
 简洁列出：
 
-- Markdown PRD、含 UI 的 DOCX、HTML 原型、manifest 和截图目录。
-- 已覆盖的关键流程与页面状态。
-- 实际执行的截图、内容、DOCX 和 HTTP 校验。
-- 仍未完成的限制，例如未进行 Word/PDF 视觉预览或未直接写入 Figma。
-
-不要重复整份 PRD，不要把未验证的结果描述为通过。
+- HTML 原型、`ui-manifest.json` 与 `screenshots/*.png` 的可点击路径。
+- 回溯命中的真实路由、Layout 壳子与已覆盖的页面业务状态。
+- 实际执行的 `ui-ux-pro-max` 检索、`capture_ui.py` 截图、像素检查与 `validate_ui.py` 校验结果。
+- 明确限制说明（如未连接本地真实后端接口、未直接写入 Figma 画布等）。

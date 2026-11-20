@@ -14,7 +14,8 @@ import { applyExecutionReview, assessExecutionReadiness } from '../verification/
 import { buildCaseExecutionFingerprint, runPlaywrightTest, type PlaywrightTestOptions } from '../verification/playwright-test.js'
 import { workspaceFingerprint } from '../verification/self-test-artifacts.js'
 import { canWriteTestFile } from '../verification/self-test-permissions.js'
-import { CopilotExecutionModel, parseExecutionImplementation, type ExecutionImplementation, type ExecutionModelContext, type ExecutionModelInput, type ExecutionModelResult } from './execution-model.js'
+import { TestImplementationAgent, parseExecutionImplementation, type ExecutionImplementation, type ExecutionModelContext, type ExecutionModelInput, type ExecutionModelResult } from './execution-model.js'
+import { AgentBoundaryError } from '../agents/runtime.js'
 import { planningDigest, planningEnvironment, planningRulesVersion, qualifiedPlanning } from './planning-model.js'
 import { packageInputFingerprint, validatePackageScope } from './scoped-package.js'
 
@@ -175,7 +176,7 @@ export class TestExecutionService {
     const snapshot = dependencies.snapshot ?? snapshotWorkspace
     this.snapshot = async workspace => planningDigest({ source: await snapshot(workspace), dependencies: await dependencyFingerprint(workspace), playwrightVersion })
     this.runner = dependencies.runner ?? runPlaywrightTest
-    const model = new CopilotExecutionModel()
+    const model = new TestImplementationAgent()
     this.implementScripts = dependencies.implement ?? model.generate.bind(model)
     this.installDependencies = dependencies.install ?? installPlaywright
   }
@@ -255,6 +256,13 @@ export class TestExecutionService {
       const selected = this.definitions(value).filter(testCase => run.cases.some(item => item.selected && item.caseId === testCase.id))
       const output = parseExecutionImplementation(JSON.stringify(await this.implementScripts({ modelId: value.modelId, cases: selected }, {
         workspace, token, signal: controller.signal,
+        assertCurrent: async () => {
+          controller.signal.throwIfAborted()
+          const current = await this.run(owner, id)
+          if (current.version !== run.version || current.status !== 'preparing') throw new AgentBoundaryError('AGENT_STALE')
+          await this.packageFor(run)
+          await this.unchanged(run, workspace)
+        },
         onProgress: async () => {
           controller.signal.throwIfAborted()
           run = await this.replace(run, { events: [...run.events, { at: now(), kind: 'info', text: 'Implementation model progress; read-only session active.' }] })

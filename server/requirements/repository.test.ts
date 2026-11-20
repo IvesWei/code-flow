@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { mkdtemp, readdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -13,7 +13,11 @@ import {
   type RequirementSqlPool,
 } from './repository.js'
 import { initializeRequirementsStorage, type RequirementsStorageDependencies } from './runtime.js'
+import { validationInputFingerprint, validationInputMatches } from './artifacts.js'
 import { validatePrototypeDesign } from './prototype-design.js'
+import { validatePrd } from './validation.js'
+import { captureFingerprint, scopeFingerprint, validateCapturePlan } from './capture-plan.js'
+import { dualPrdFixture } from '../tests/fixtures/dual-prd.js'
 
 function project(overrides: Partial<RequirementProject> = {}): RequirementProject {
   return {
@@ -57,11 +61,171 @@ class MockSql implements RequirementSqlPool {
       assert.match(sql, /WHERE owner_id = \? ORDER BY created_at DESC, id DESC LIMIT 100$/)
       result = result.filter(item => item.ownerId === values[0]).sort((left, right) => right.createdAt.localeCompare(left.createdAt) || right.id.localeCompare(left.id)).slice(0, 100)
     }
-    return [result.map(item => ({ id: item.id, owner_id: String(item.ownerId), version: String(item.version), status: item.status, created_at: item.createdAt, updated_at: item.updatedAt, body: JSON.stringify(item) })), []]
+    return [result.map(item => ({ id: item.id, owner_id: String(item.ownerId), version: String(item.version), status: item.status, created_at: item.createdAt, updated_at: item.updatedAt, body: JSON.stringify(item, (_key, value: unknown) => value && typeof value === 'object' && !Array.isArray(value)
+      ? Object.fromEntries(Object.entries(value).sort(([left], [right]) => left.length - right.length || left.localeCompare(right))) : value) })), []]
   }
 }
 
 for (const backend of ['json', 'mysql'] as const) {
+  test(`${backend}: classified checkpoint, capture question identity and concrete entry context survive reload`, async () => temporary(async root => {
+    const repository = await createRequirementRepository(backend, root, new MockSql())
+    const prd = { title: 'Plans', summary: 'Plan scope', blocks: [{ id: 'B1', title: 'Plan', content: 'Change model selection', requirementIds: ['R1'], sourceIds: [] }], requirements: [{ id: 'R1', title: 'Model', description: 'Select model', sourceIds: [], acceptance: [{ id: 'A1', text: 'Model displayed' }] }] }
+    const value = project({ sources: [{ id: 'S1', name: 'code.md', kind: 'file', sha256: 'a'.repeat(64), sizeBytes: 123 }], preview: { origin: 'https://tmp.test.sunmi.com', generation: 1, entryPaths: ['/plans?projectId=42&projectKey=P-1'] } })
+    const fingerprint = scopeFingerprint(value)
+    value.scopeCheckpoint = {
+      version: 1, fingerprint, prd, blocks: [{ blockId: 'B1', kind: 'existing', reason: 'Existing plan' }],
+      mapping: [{ blockId: 'B1', kind: 'existing', path: '/plans?projectId=42&projectKey=P-1', sourceId: 'S1', quote: 'const route = "/plans";', activate: [{ kind: 'dialog', name: 'Edit plan' }], expectedFields: ['Model', 'Owner', 'Model'] }],
+    }
+    value.questions = [{ id: 'capture-entry', text: 'Provide context', priority: 'P0', impact: 'Capture only', choices: ['URL', 'Source'], recommendation: 'URL', capture: { fingerprint, blockIds: ['B1'] } }]
+    value.scopeCheckpoint.mapping![0].discover = [{
+      fromPath: value.preview!.entryPaths![0], path: '/plans/detail', column: 'Plan name', sourceId: 'S1',
+      quote: 'const goPlan = id => history.push("/plans/detail?projectId=" + projectId + "&projectKey=" + projectKey + "&planId=" + id);',
+      columnQuote: 'title: "Plan name", render: row => <a onClick={() => goPlan(row.id)}>{row.name}</a>',
+      handler: 'goPlan', queryKeys: ['projectId', 'projectKey', 'planId'],
+    }]
+    const captureHash = captureFingerprint(value, prd, value.scopeCheckpoint.blocks)
+    const pages = ['B1-view-1', 'B1-view-2'].map((viewId, index) => ({
+      blockId: 'B1', viewId, path: `/plans/detail?projectId=42&projectKey=P-1&planId=${index + 1}`,
+      capturedAt: value.createdAt, fingerprint: captureHash, structure: '{}',
+      image: { id: `IMAGE-${index}`, name: `plan-${index}.png`, kind: 'file' as const, sizeBytes: 123, sha256: 'b'.repeat(64), storageKey: `requirements/images/${index}.png` },
+    }))
+    value.revisions = [{ id: 'REV-1', createdAt: value.createdAt, prd, screens: [], existingPages: pages, capturePlan: { version: 1, fingerprint: captureHash, blocks: value.scopeCheckpoint.blocks, views: pages.map(page => ({ blockId: page.blockId, viewId: page.viewId })) } }]
+    await repository.create(value)
+    const restored = (await repository.get(value.id, 7))!
+    assert.deepEqual(restored.scopeCheckpoint, value.scopeCheckpoint)
+    assert.deepEqual(restored.questions, value.questions)
+    assert.deepEqual(restored.preview, value.preview)
+    assert.deepEqual(restored.revisions, value.revisions)
+    assert.equal(scopeFingerprint(restored), fingerprint)
+    const legacy = structuredClone(value); legacy.id = randomUUID(); delete legacy.scopeCheckpoint!.mapping
+    await repository.create(legacy)
+    assert.deepEqual((await repository.get(legacy.id, 7))!.scopeCheckpoint, legacy.scopeCheckpoint)
+    for (const mutate of [
+      (copy: RequirementProject) => { copy.preview!.entryPaths = ['/plans?apiKey=secret'] },
+      (copy: RequirementProject) => { copy.scopeCheckpoint!.blocks[0].blockId = 'unknown' },
+      (copy: RequirementProject) => { copy.questions[0].capture!.fingerprint = 'bad' },
+      (copy: RequirementProject) => { copy.scopeCheckpoint!.mapping![0].sourceId = 'unknown' },
+      (copy: RequirementProject) => { copy.scopeCheckpoint!.mapping![0].blockId = 'unknown' },
+      (copy: RequirementProject) => { copy.scopeCheckpoint!.mapping![0].path = '/plans?token=secret' },
+      (copy: RequirementProject) => { copy.scopeCheckpoint!.mapping![0].openDialog = 'Edit plan' },
+      (copy: RequirementProject) => { copy.scopeCheckpoint!.mapping![0].activate![0].name = '' },
+      (copy: RequirementProject) => { delete copy.scopeCheckpoint!.mapping![0].expectedFields },
+      (copy: RequirementProject) => { copy.scopeCheckpoint!.mapping!.push(copy.scopeCheckpoint!.mapping![0]) },
+      (copy: RequirementProject) => { copy.scopeCheckpoint!.mapping![0].discover![0].sourceId = 'unknown' },
+      (copy: RequirementProject) => { copy.scopeCheckpoint!.mapping![0].discover![0].queryKeys = ['token'] },
+      (copy: RequirementProject) => { copy.revisions[0].existingPages!.pop() },
+      (copy: RequirementProject) => { delete copy.revisions[0].capturePlan!.views },
+      (copy: RequirementProject) => { copy.revisions[0].existingPages![0].viewId = 'invalid:identity' },
+    ]) {
+      const invalid = structuredClone(value); invalid.id = randomUUID(); mutate(invalid)
+      await assert.rejects(repository.create(invalid), RequirementContractError)
+    }
+  }))
+  test(`${backend}: dual-template metadata round-trips with stable fingerprint and legacy revisions unchanged`, async () => temporary(async root => {
+    const repository = await createRequirementRepository(backend, root, new MockSql())
+    const legacy = { title: '订单需求', summary: '范围', blocks: [{ id: 'B1', title: '订单', content: '页面', requirementIds: ['R1'], sourceIds: [] }], requirements: [{ id: 'R1', title: '查询', description: '显示订单', sourceIds: [], acceptance: [{ id: 'A1', text: '返回订单' }] }] }
+    const value = project({ revisions: [legacy, dualPrdFixture(legacy)].map(prd => ({ id: randomUUID(), createdAt: '2026-10-29T00:00:00.000Z', prd, screens: [] })) })
+    const fingerprint = captureFingerprint(value, value.revisions[1].prd)
+    await repository.create(value)
+    const restored = (await repository.get(value.id, 7))!
+    assert.deepEqual(restored.revisions, value.revisions)
+    assert.equal(captureFingerprint(restored, restored.revisions[1].prd), fingerprint)
+    assert.equal(Object.hasOwn(restored.revisions[0].prd, 'templateVersion'), false)
+    value.id = randomUUID()
+    value.revisions[1].prd.requirements[0].specification!.criteria[0].then = 'Changed outside acceptance mapping'
+    await assert.rejects(repository.create(value), RequirementContractError)
+  }))
+  test(`${backend}: prototype conversation bindings survive reload and reject duplicate or unsafe metadata`, async () => temporary(async root => {
+    const repository = await createRequirementRepository(backend, root, new MockSql())
+    const binding = { prototypeId: 'PAGE-1', conversationId: randomUUID(), sdkSessionId: randomUUID(), modelId: 'auto', contextFingerprint: 'a'.repeat(64), prototypeFingerprint: 'b'.repeat(64), skillFingerprint: 'c'.repeat(64) }
+    const value = project({ prototypeConversations: [binding] })
+    await repository.create(value)
+    assert.deepEqual((await repository.get(value.id, 7))!.prototypeConversations, [binding])
+    for (const bindings of [[binding, binding], [{ ...binding, prototypeId: '../escape' }], [{ ...binding, sdkSessionId: 'invalid' }], [{ ...binding, contextFingerprint: 'bad' }], [{ ...binding, password: 'never persist' }]]) {
+      await assert.rejects(repository.create(project({ prototypeConversations: bindings })), RequirementContractError)
+    }
+  }))
+  test(`${backend}: element-capture prototypes, sourceFallback plans and validation fingerprints survive MySQL key reordering`, async () => temporary(async root => {
+    const repository = await createRequirementRepository(backend, root, new MockSql())
+    const prd = validatePrd(dualPrdFixture({ title: '提测详情', summary: '范围', blocks: [{ id: 'B-1', title: '测试失败弹窗', content: '弹窗', requirementIds: ['R1'], sourceIds: [] }], requirements: [{ id: 'R1', title: '不打回结束任务', description: '选择不打回并提交', fields: [{ name: '失败原因', description: '既有原因' }], sourceIds: [], acceptance: [{ id: 'A1', text: '任务以失败终态结束' }] }] }), [])
+    const stateId = randomUUID()
+    const design = validatePrototypeDesign([{
+      id: 'PAGE-1', title: '提测详情页', mode: 'incremental',
+      sourceAnchor: { route: '/requestTask', layout: 'src/layouts/ConfigLayout.tsx', pageFile: 'src/pages/RequirementTaskDetail/index.tsx' },
+      html: '<!doctype html><html><body><div id="submit-modal-card" data-requirement-id="R1" data-acceptance-id="A1">失败原因</div></body></html>',
+      states: [{ id: stateId, name: '失败弹窗-不打回态', proves: '弹窗特写', capture: { mode: 'element', selector: '#submit-modal-card', padding: 24 }, requirementIds: ['R1'], acceptanceIds: ['A1'], changes: [] }],
+    }], prd)
+    const blocks = [{ blockId: 'B-1', kind: 'existing' as const, reason: '现有测试失败弹窗增量改造' }]
+    const value = project({ status: 'design_review' })
+    const revision = {
+      id: randomUUID(), createdAt: '2026-10-29T00:00:00.000Z', confirmedAt: '2026-10-29T00:00:00.000Z', prd,
+      screens: design.screens, prototypes: design.prototypes,
+      capturePlan: { version: 1 as const, fingerprint: captureFingerprint(value, prd, blocks), blocks, sourceFallback: { code: 'PAGE_CAPTURE_TARGET', blocks: [{ blockId: 'B-1', fields: ['失败原因'], content: [] }] } },
+      validation: { at: '2026-10-29T00:00:00.000Z', errors: [] as string[] },
+    }
+    value.revisions = [revision]
+    const legacyDigest = createHash('sha256').update(JSON.stringify({ projectId: value.id, revisionId: revision.id, prd: revision.prd, screens: revision.screens, prototypes: revision.prototypes, sources: value.sources, decisions: value.decisions })).digest('hex')
+    const canonicalDigest = validationInputFingerprint(value, revision)
+    await repository.create(value)
+    let restored = (await repository.get(value.id, 7))!
+    assert.equal((await repository.list(7)).length, 1)
+    assert.deepEqual(restored.revisions[0].screens[0].capture, { mode: 'element', selector: '#submit-modal-card', padding: 24 })
+    assert.equal(validationInputMatches(canonicalDigest, restored, restored.revisions[0]), true)
+    assert.equal(validationInputMatches(legacyDigest, restored, restored.revisions[0]), true)
+    restored.jobs.push({ id: randomUUID(), stage: 'reconstruct', revisionId: revision.id, startedAt: revision.createdAt, status: 'running' })
+    restored.version++
+    await repository.replace(restored, restored.version - 1)
+    await repository.recover()
+    restored = (await repository.get(value.id, 7))!
+    assert.equal(restored.jobs.at(-1)?.status, 'interrupted')
+    assert.equal(restored.status, 'design_review')
+    assert.deepEqual(restored.revisions, [revision])
+    const id = randomUUID()
+    const image = { kind: 'file' as const, id, name: 'source-reconstruction-1.png', storageKey: `requirements/sources/7/${value.id}/${id}.png`, sizeBytes: 120, sha256: 'a'.repeat(64) }
+    const fallback = restored.revisions[0].capturePlan!.sourceFallback!
+    const entry = { blockId: 'B-1', createdAt: revision.createdAt, image }
+    fallback.images = [entry]
+    restored.version++
+    await repository.replace(restored, restored.version - 1)
+    const saved = (await repository.get(value.id, 7))!
+    assert.deepEqual(saved.revisions[0].capturePlan?.sourceFallback?.images, [entry])
+    assert.equal(validationInputMatches(canonicalDigest, saved, saved.revisions[0]), true)
+    for (const invalid of [[], [entry, entry], [{ ...entry, blockId: 'absent' }], [{ ...entry, createdAt: 'bad' }], [{ ...entry, image: { ...image, storageKey: `requirements/sources/8/${value.id}/${id}.png` } }], [{ ...entry, image: { ...image, name: 'target.png' } }]]) {
+      const bad = structuredClone(saved)
+      bad.revisions[0].capturePlan!.sourceFallback!.images = invalid
+      bad.version++
+      await assert.rejects(repository.replace(bad, saved.version), RequirementContractError)
+    }
+    restored.revisions[0].screens[0].title = '篡改后的标题'
+    assert.equal(validationInputMatches(canonicalDigest, restored, restored.revisions[0]), false)
+    assert.equal(validationInputMatches(legacyDigest, restored, restored.revisions[0]), false)
+  }))
+  test(`${backend}: classified zero-capture plans round-trip and reject missing, duplicate or unproven coverage`, async () => temporary(async root => {
+    const repository = await createRequirementRepository(backend, root, new MockSql())
+    const prd = { title: 'Reports', summary: 'New', blocks: [{ id: 'B1', title: 'Reports', content: 'New report', requirementIds: ['R1'], sourceIds: [] }], requirements: [{ id: 'R1', title: 'Report', description: 'New report', sourceIds: [], acceptance: [{ id: 'A1', text: 'Visible' }] }] }
+    const plan = { version: 1 as const, fingerprint: 'a'.repeat(64), blocks: [{ blockId: 'B1', kind: 'new' as const, reason: 'User confirmed an independent new report' }] }
+    const value = project({ revisions: [{ id: randomUUID(), createdAt: '2026-10-29T00:00:00.000Z', prd, screens: [], existingPages: [], capturePlan: plan }] })
+    plan.fingerprint = captureFingerprint(value, prd, plan.blocks)
+    await repository.create(value)
+    const restored = (await repository.get(value.id, 7))!
+    const revision = restored.revisions[0]
+    assert.deepEqual(revision.capturePlan, plan)
+    const validated = validateCapturePlan(revision.capturePlan, revision.prd, revision.existingPages)
+    assert.equal(captureFingerprint(restored, revision.prd, validated.blocks), plan.fingerprint)
+    const invalids = [
+      { ...plan, blocks: [] },
+      { ...plan, blocks: [...plan.blocks, ...plan.blocks] },
+      { ...plan, blocks: [{ ...plan.blocks[0], kind: 'existing' }] },
+      { ...plan, blocks: [{ ...plan.blocks[0], kind: 'unresolved' }] },
+      { ...plan, blocks: [{ ...plan.blocks[0], reason: '' }] },
+      { ...plan, fingerprint: 'invalid' },
+    ]
+    for (const invalid of invalids) {
+      const bad = structuredClone(value)
+      Object.assign(bad.revisions[0], { capturePlan: invalid })
+      await assert.rejects(repository.create({ ...bad, id: randomUUID() }), RequirementContractError)
+    }
+  }))
   test(`${backend}: shared source round-trips and rejects independent derived-screen changes`, async () => temporary(async root => {
     const repository = await createRequirementRepository(backend, root, new MockSql())
     const prd = { title: 'Plan', summary: 'Create', blocks: [{ id: 'B1', title: 'Plan', content: 'Create', requirementIds: ['R1'], sourceIds: [] }], requirements: [{ id: 'R1', title: 'Create', description: 'Create plan', sourceIds: [], acceptance: [{ id: 'A1', text: 'Created' }] }] }
@@ -183,8 +347,9 @@ test('JSON: repository instances share a root queue and create never overwrites'
 test('MySQL: read-only schema probe, sanitized failures, no implicit JSON fallback', async () => temporary(async root => {
   const pool = new MockSql()
   await createRequirementRepository('mysql', root, pool)
-  assert.equal(pool.calls.length, 1)
+  assert.equal(pool.calls.length, 2)
   assert.match(pool.calls[0].sql, /^SELECT id, owner_id, version, status, created_at, updated_at, body .*LIMIT 0$/)
+  assert.match(pool.calls[1].sql, /^SELECT .* FROM codeflow_requirement_conversation_events LIMIT 0$/)
   assert.equal((await readdir(root)).length, 0)
   pool.failure = new Error('secret connection information')
   const repository = new MysqlRequirementRepository(pool)

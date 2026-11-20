@@ -1,0 +1,400 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Code/Flow 当前系统架构、模块关系、受控 Agent 边界及业务流程。可离线查阅。">
+  <title>Code/Flow · 系统架构图</title>
+  <style>
+    :root {
+      --ink: #252b2a; --muted: #626c67; --line: #dfe4e1; --green: #286b4e;
+      --surface: #fff; --canvas: #f5f6f5; --surface-subtle: #f0f3f1;
+      --focus-ring: #286b4e; --radius: 6px; --amber: #805a15;
+    }
+    * { box-sizing: border-box; }
+    html { scroll-padding-top: 110px; }
+    body { margin: 0; background: var(--canvas); color: var(--ink); font: 14px/1.65 "IBM Plex Sans", "Noto Sans SC", "Microsoft YaHei", system-ui, sans-serif; }
+    a { color: var(--green); text-underline-offset: 3px; overflow-wrap: anywhere; }
+    a:hover { text-decoration-thickness: 2px; }
+    :focus-visible { outline: 3px solid var(--focus-ring); outline-offset: 4px; }
+    button { font: inherit; cursor: pointer; }
+    code { font: .88em/1.6 Consolas, monospace; overflow-wrap: anywhere; }
+    h1, h2, h3, p { margin: 0; }
+    h1 { font-size: 30px; line-height: 1.4; }
+    h2 { font-size: 22px; line-height: 1.45; }
+    h3 { font-size: 15px; line-height: 1.5; }
+    svg.icon { width: 19px; height: 19px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; flex: none; }
+    .icon-defs { position: absolute; width: 0; height: 0; overflow: hidden; }
+    .skip { position: absolute; top: -80px; left: 16px; z-index: 3; padding: 12px; background: var(--surface); }
+    .skip:focus { top: 8px; }
+    .topbar { position: sticky; top: 0; z-index: 2; border-bottom: 1px solid var(--line); background: var(--surface); }
+    .topbar-inner { display: flex; align-items: center; flex-wrap: wrap; gap: 12px 24px; max-width: 1328px; margin: auto; padding: 12px 24px; }
+    .brand { display: inline-flex; gap: 9px; align-items: center; color: var(--ink); text-decoration: none; font-size: 17px; font-weight: 750; }
+    .brand svg { color: var(--green); }
+    nav { display: flex; align-items: center; flex-wrap: wrap; gap: 4px; margin-left: auto; }
+    nav a, .print { min-height: 44px; display: inline-flex; align-items: center; gap: 7px; padding: 9px 12px; border-radius: var(--radius); font-size: 13px; }
+    nav a { color: var(--muted); text-decoration: none; }
+    nav a:hover { background: var(--surface-subtle); color: var(--green); }
+    .print { border: 1px solid var(--line); background: var(--surface); color: var(--ink); }
+    main { max-width: 1328px; margin: auto; padding: 38px 24px 64px; }
+    .hero { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; margin-bottom: 28px; }
+    .eyebrow { margin-bottom: 8px; color: var(--green); font-size: 11px; font-weight: 750; letter-spacing: .08em; }
+    .lead { max-width: 800px; margin-top: 10px; color: var(--muted); }
+    .stamp { flex: none; text-align: right; color: var(--muted); font-size: 12px; }
+    .stamp strong { display: block; color: var(--ink); margin-bottom: 3px; }
+    .pill { display: inline-block; padding: 3px 8px; border: 1px solid var(--line); border-radius: 4px; color: var(--green); background: var(--surface); font-size: 11px; font-weight: 650; }
+    section { margin-top: 32px; scroll-margin-top: 16px; }
+    .section-heading { display: flex; align-items: baseline; flex-wrap: wrap; gap: 8px 14px; margin-bottom: 14px; }
+    .section-heading > p { color: var(--muted); font-size: 13px; }
+    .section-number { color: var(--green); font: 13px Consolas, monospace; margin-right: 7px; }
+    .diagram, .panel { padding: 20px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); }
+    .layer-title { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 12px; margin-bottom: 12px; font-size: 12px; font-weight: 700; }
+    .layer-title span { font-weight: 400; color: var(--muted); }
+    .grid { display: grid; gap: 12px; }
+    .grid > * { min-width: 0; }
+    .four { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+    .three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .node { min-width: 0; padding: 15px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); }
+    .node p { margin-top: 6px; color: var(--muted); font-size: 12px; }
+    .node code { display: block; margin-top: 5px; color: var(--green); }
+    .node a { display: inline-block; margin-top: 9px; font-size: 12px; }
+    .node .kind { display: block; margin-bottom: 4px; color: var(--green); font-size: 10px; font-weight: 750; }
+    .node.soft { background: var(--surface-subtle); }
+    .node.agent { border-top: 3px solid var(--green); }
+    .arrow { display: flex; justify-content: center; align-items: center; gap: 8px; min-height: 46px; color: var(--muted); text-align: center; font-size: 12px; }
+    .arrow::before { content: "\2193"; color: var(--green); font-size: 22px; line-height: 1; }
+    .boundary { padding: 16px; border: 1px dashed #82988a; border-radius: var(--radius); background: #fafcfb; }
+    .branch > .arrow { min-height: 40px; }
+    .branch .node { height: auto; }
+    .legend { display: flex; flex-wrap: wrap; gap: 6px 18px; margin-top: 15px; color: var(--muted); font-size: 12px; }
+    .notice { margin-top: 14px; padding: 12px 15px; border-left: 3px solid var(--green); background: var(--surface-subtle); font-size: 13px; }
+    .notice.warning { border-left-color: var(--amber); background: #fbf8f0; color: #67552f; }
+    .external { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--line); color: var(--muted); font-size: 12px; }
+    .external strong { color: var(--ink); }
+    .relations { width: 100%; border-collapse: collapse; font-size: 12px; }
+    .relations th, .relations td { padding: 12px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; overflow-wrap: anywhere; }
+    .relations th { background: var(--surface-subtle); color: var(--muted); font-weight: 650; }
+    .relations th:first-child { width: 25%; }
+    .relations th:nth-child(2) { width: 33%; }
+    .relations tr:last-child td { border-bottom: 0; }
+    .table-panel { padding: 0; overflow: hidden; }
+    .relations caption { padding: 15px 12px; text-align: left; font-weight: 700; color: var(--ink); }
+    .workflow + .workflow { margin-top: 14px; }
+    .workflow h3 { margin-bottom: 14px; }
+    .flow { list-style: none; display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 22px; margin: 0; padding: 0; counter-reset: step; }
+    .flow li { position: relative; min-width: 0; padding: 12px; border: 1px solid var(--line); border-radius: var(--radius); counter-increment: step; }
+    .flow li::before { content: counter(step, decimal-leading-zero); display: block; margin-bottom: 6px; color: var(--green); font: 11px Consolas, monospace; }
+    .flow li:not(:last-child)::after { content: "\2192"; position: absolute; right: -18px; top: 38px; color: var(--green); }
+    .flow strong { display: block; font-size: 13px; }
+    .flow span { display: block; margin-top: 5px; color: var(--muted); font-size: 12px; }
+    .workflow > p { margin-top: 12px; font-size: 12px; color: var(--muted); }
+    .role-card { border-top: 3px solid var(--green); }
+    .role-card > code { display: block; color: var(--muted); margin: 4px 0 10px; }
+    .role-card > p { color: var(--muted); font-size: 12px; min-height: 3.3em; }
+    .role-card dl { display: grid; grid-template-columns: 63px minmax(0, 1fr); gap: 7px 9px; margin: 14px 0 0; font-size: 12px; }
+    .role-card dt { color: var(--muted); }
+    .role-card dd { min-width: 0; margin: 0; overflow-wrap: anywhere; }
+    .role-card dd a { display: block; margin-top: 4px; }
+    .guard { margin-top: 14px; }
+    .guard p { color: var(--muted); font-size: 12px; margin-top: 6px; }
+    .maintenance { display: grid; grid-template-columns: 1.2fr 1fr; gap: 24px; }
+    .maintenance ul { padding-left: 18px; margin: 9px 0 0; color: var(--muted); font-size: 13px; }
+    .maintenance li + li { margin-top: 6px; }
+    .command { margin-top: 10px; padding: 12px; background: var(--surface-subtle); border-radius: var(--radius); white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.7 Consolas, monospace; }
+    footer { margin-top: 28px; display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px; color: var(--muted); font-size: 12px; }
+    @media (max-width: 1000px) {
+      .four { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .flow { grid-template-columns: minmax(0, 1fr); gap: 24px; }
+      .flow li:not(:last-child)::after { content: "\2193"; top: auto; right: 50%; bottom: -24px; }
+    }
+    @media (max-width: 700px) {
+      html { scroll-padding-top: 158px; }
+      .topbar-inner { padding: 10px 16px; gap: 4px 12px; }
+      .brand { flex: 1; }
+      nav { order: 2; width: 100%; margin-left: 0; }
+      nav a { flex: 1; justify-content: center; padding: 8px 4px; font-size: 12px; }
+      .print { padding: 8px; }
+      main { padding: 26px 16px 40px; }
+      h1 { font-size: 24px; } h2 { font-size: 20px; }
+      .hero { flex-direction: column; gap: 14px; }
+      .stamp { text-align: left; }
+      .stamp strong { display: inline; margin-right: 8px; }
+      .three, .two, .maintenance { grid-template-columns: minmax(0, 1fr); }
+      .diagram, .panel { padding: 14px; }
+      .table-panel { padding: 0; }
+      .boundary { padding: 12px; }
+      .relations thead { display: none; }
+      .relations tr { display: block; padding: 12px; border-bottom: 1px solid var(--line); }
+      .relations td { display: block; padding: 3px 0; border: 0; }
+      .relations td:first-child { font-weight: 700; color: var(--green); }
+      .relations td:nth-child(2) { color: var(--muted); }
+      .role-card > p { min-height: 0; }
+    }
+    @media (max-width: 420px) { .four { grid-template-columns: minmax(0, 1fr); } .node { padding: 13px; } }
+    @media print {
+      @page { margin: 12mm; }
+      html { scroll-padding-top: 0; }
+      body { background: white; font-size: 11px; }
+      .topbar, .skip, .no-print { display: none; }
+      main { padding: 0; max-width: none; }
+      .hero { margin-bottom: 16px; }
+      section { margin-top: 20px; }
+      .node, .role-card, .flow li, .guard, .relations tr { break-inside: avoid; }
+      .four, .three, .two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .flow { display: block; }
+      .flow li { margin-bottom: 18px; }
+      .flow li:not(:last-child)::after { content: "\2193"; top: auto; right: 50%; bottom: -21px; }
+      .maintenance { display: block; }
+      a { color: var(--ink); }
+      h1 { font-size: 25px; } h2 { font-size: 19px; }
+    }
+  </style>
+</head>
+<body>
+  <svg class="icon-defs" aria-hidden="true" xmlns="http://www.w3.org/2000/svg">
+    <symbol id="layers" viewBox="0 0 24 24"><path d="m12 3 10 5-10 5L2 8l10-5Z"/><path d="m2 12 10 5 10-5M2 16l10 5 10-5"/></symbol>
+    <symbol id="printer" viewBox="0 0 24 24"><path d="M6 9V3h12v6M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><path d="M6 14h12v8H6zM18 12h.01"/></symbol>
+  </svg>
+  <a class="skip" href="#overview">跳至架构内容</a>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <a class="brand" href="#top"><svg class="icon" aria-hidden="true"><use href="#layers"/></svg>Code/Flow <span class="pill">架构地图</span></a>
+      <nav aria-label="架构章节">
+        <a href="#overview">系统总览</a><a href="#components">模块关系</a><a href="#flows">业务流程</a><a href="#agents">Agent 边界</a><a href="#maintenance">维护约定</a>
+      </nav>
+      <button class="print" id="print" type="button"><svg class="icon" aria-hidden="true"><use href="#printer"/></svg>打印 / PDF</button>
+    </div>
+  </header>
+  <main id="top">
+    <div class="hero">
+      <div>
+        <p class="eyebrow">SYSTEM ARCHITECTURE / CONTROLLED AGENTS</p>
+        <h1>当前系统架构</h1>
+        <p class="lead">按业务模块组织的全栈模块化单体。平台掌握流程与审批，专业 Agent 负责阶段任务，确定性服务负责实际执行。不是自治 Agent 网络，也不是微服务部署图。</p>
+      </div>
+      <div class="stamp"><strong>源码核对日期</strong><time datetime="2026-11-20">2026-11-20</time><br>撰稿检查点、取证依据和正式修订分别保存<br><span class="pill">离线可读 · 非运行监控</span></div>
+    </div>
+
+    <section id="overview" aria-labelledby="overview-title">
+      <div class="section-heading"><h2 id="overview-title"><span class="section-number">01</span>系统总览</h2><p>从浏览器入口到模型、执行工具和数据</p></div>
+      <div class="diagram" aria-label="系统分层架构图">
+        <div class="layer-title">浏览器 / React 19 + React Router 7 <span>开发使用 Vite 8；前端与 API 独立启动</span></div>
+        <div class="grid four">
+          <article class="node"><span class="kind">WORKSPACE</span><h3>需求与设计</h3><code>/requirements<br>/requirements/:projectId</code><p>材料、澄清、双版 PRD、原型与导出</p></article>
+          <article class="node"><span class="kind">WORKSPACE</span><h3>编码工作台</h3><code>/</code><p>任务、问答、代码变更、发布与自测</p></article>
+          <article class="node"><span class="kind">WORKSPACE</span><h3>用例规划</h3><code>/planning</code><p>用例生成、独立评审、发布用例包</p></article>
+          <article class="node"><span class="kind">WORKSPACE</span><h3>用例执行</h3><code>/execution</code><p>工作区、脚本提案、安装审批与结果</p></article>
+        </div>
+        <div class="arrow">HTTP JSON 请求 / 轮询读取进度与产物</div>
+        <article class="node soft"><span class="kind">API ENTRY / EXPRESS 5</span><h3>server/index.ts + server/http</h3><p>GitHub OAuth、HttpOnly 会话、用户归属、Origin 校验、上传与 API 路由；开发时由 Vite 代理 /api。</p><a data-source href="../server/index.ts">查看 API 组装入口</a></article>
+        <div class="arrow">平台选择阶段、核验版本、控制人工门禁</div>
+        <div class="boundary">
+          <div class="layer-title">业务编排模块 <span>共享 Node.js 服务进程；业务状态仍由 Service / Worker 持有</span></div>
+          <div class="grid four">
+            <article class="node"><h3>RequirementService</h3><p>导入、取证、澄清、PRD 与设计；按修订补充现状图或业务变更清单，不改变已有确认</p><a data-source href="../server/requirements/service.ts">requirements/service.ts</a></article>
+            <article class="node"><h3>CodingWorker</h3><p>编码、工程检查、发布等待、分阶段自测与恢复</p><a data-source href="../server/execution/worker.ts">execution/worker.ts</a></article>
+            <article class="node"><h3>CasePlanningService</h3><p>规划版本、生成和评审、不可变用例包</p><a data-source href="../server/testing/planning-service.ts">testing/planning-service.ts</a></article>
+            <article class="node"><h3>TestExecutionService</h3><p>工作区、提案校验、安装与绑定审批、实际执行</p><a data-source href="../server/testing/execution-service.ts">testing/execution-service.ts</a></article>
+          </div>
+        </div>
+        <div class="grid three">
+          <div class="branch">
+            <div class="arrow">调用指定角色</div>
+            <article class="node agent"><span class="kind">CONTROLLED AGENTS</span><h3>角色与执行边界</h3><p>profiles / runtime / workspace：不可变交接、权限交集、指纹校验、互斥、预算和生命周期审计。</p><a href="#agents">查看 8 个角色及调用边界</a></article>
+            <div class="arrow">创建 / 恢复会话，提交 send</div>
+            <article class="node"><h3>GitHub Copilot SDK → CLI → 模型服务</h3><p>专业任务通过 SDK 会话执行。SDK 事件由服务端消费并存储，再由页面读取；不是浏览器 SSE。</p><a data-source href="../server/execution/copilot-session.ts">查看编码会话封装</a></article>
+          </div>
+          <div class="branch">
+            <div class="arrow">调用确定性能力</div>
+            <article class="node"><span class="kind">PLATFORM TOOLS</span><h3>Git / 验证 / 浏览器 / 导出</h3><p>平台负责仓库操作、工程检查、Playwright 运行、截图、Word/ZIP 导出、安装与发布。不是每项操作再启动一个 Agent。</p><a data-source href="../server/verification/playwright-test.ts">查看实际测试执行器</a></article>
+            <div class="arrow">写入工作区与执行证据</div>
+            <article class="node"><h3>本地文件系统 / DATA_DIR</h3><p>任务工作区、来源快照、附件、原型、截图、阶段产物与 SDK 历史；数据库配置不替代这些文件。</p><a data-source href="../server/requirements/workspace.ts">查看需求工作区边界</a></article>
+          </div>
+          <div class="branch">
+            <div class="arrow">保存状态、版本与证据引用</div>
+            <article class="node"><span class="kind">PERSISTENCE</span><h3>TaskStore / RequirementRepository / TestingRepository</h3><p>各业务域保留自己的记录与校验。存储适配器不拥有业务流程；并发保存使用现有版本与 CAS 规则。</p><a data-source href="../server/tasks/store.ts">查看任务状态与持久化契约</a></article>
+            <div class="arrow">按配置选择后端</div>
+            <article class="node"><h3>JSON 默认 / MySQL 可选</h3><p>配置为 MySQL 时，故障不会静默回退到 JSON。既有实例锁与运行租约控制写入实例，不是分布式作业调度。</p><a data-source href="../server/storage/storage-runtime.ts">查看存储组装</a></article>
+          </div>
+        </div>
+        <p class="external"><strong>其他外部交互：</strong>认证模块 ↔ GitHub OAuth；平台 Git 工具 ↔ 远端仓库；浏览器执行器 ↔ 用户指定的被测预览站点。OAuth 登录不等于自动取得所有私有仓库的 Git 凭据。</p>
+        <div class="legend"><span>↓ / →：主要调用或数据方向</span><span>虚线框：共享服务进程内的模块边界</span><span>来源、产物与状态有各自版本，不以会话 ID 代替</span></div>
+      </div>
+      <p class="notice">页面更新以 HTTP 轮询为主：需求作业约 2.5 秒，编码活动详情与独立测试约 2 秒；列表及自动化详情另有频率。登录会话保存在服务端内存，重启后需要重新授权。</p>
+    </section>
+
+    <section id="components" aria-labelledby="components-title">
+      <div class="section-heading"><h2 id="components-title"><span class="section-number">02</span>模块关系与源码入口</h2><p>沿调用方向查阅；这是图的文字关系视图</p></div>
+      <div class="panel table-panel">
+        <table class="relations">
+          <caption>主要组件与依赖关系</caption>
+          <thead><tr><th scope="col">组件 / 层</th><th scope="col">调用方向</th><th scope="col">职责及源码</th></tr></thead>
+          <tbody>
+            <tr><td>前端工作区</td><td>AppRouter → 各业务工作区 → /api</td><td>入口、懒加载与导航；非浏览器直连模型。<br><a data-source href="../src/app/AppRouter.tsx">src/app/AppRouter.tsx</a></td></tr>
+            <tr><td>认证与访问控制</td><td>HTTP → 认证 / 来源 / 用户归属 → 业务模块</td><td>不是交给 Agent 决定谁能访问。<br><a data-source href="../server/security/auth.ts">security/auth.ts</a> · <a data-source href="../server/security/access.ts">security/access.ts</a></td></tr>
+            <tr><td>需求与设计</td><td>HTTP → RequirementService → RequirementAgent / DesignAgent</td><td>证据、澄清、PRD、原型及调整；保留专属原型会话。创建时将仓库、分支和目录作为项目配置保存，不依赖快照成功；只有成功快照才进入原始资料。详情分别回显配置和快照来源，旧快照只读校验后解析记录。PRD 重试由平台验证取证和候选，模型仅提议字段补丁。<br><a data-source href="../server/http/requirements.ts">http/requirements.ts</a> · <a data-source href="../server/requirements/model.ts">requirements/model.ts</a> · <a data-source href="../server/requirements/prd-authoring.ts">prd-authoring.ts</a> · <a data-source href="../server/requirements/prd-repair.ts">prd-repair.ts</a> · <a data-source href="../server/requirements/prototype-adjustment.ts">prototype-adjustment.ts</a></td></tr>
+            <tr><td>编码与自测</td><td>CodingWorker → CodingAgent → 平台选择的自测角色</td><td>工作区编码及分阶段自测；平台运行测试并核定状态。<br><a data-source href="../server/execution/coding-agent.ts">execution/coding-agent.ts</a> · <a data-source href="../server/verification/self-test-artifacts.ts">verification/self-test-artifacts.ts</a></td></tr>
+            <tr><td>独立用例规划</td><td>CasePlanningService → TestPlanningAgent → 全新评审会话</td><td>生成、评审、版本与发布；评审给出 findings，不持有最终审批权。<br><a data-source href="../server/testing/planning-model.ts">testing/planning-model.ts</a></td></tr>
+            <tr><td>独立用例执行</td><td>TestExecutionService → TestImplementationAgent → 平台写入 / 安装 / 执行</td><td>Agent 只返回实现提案；平台校验提案与来源版本，人工确认安装和绑定。<br><a data-source href="../server/testing/execution-model.ts">testing/execution-model.ts</a> · <a data-source href="../server/http/testing.ts">http/testing.ts</a></td></tr>
+            <tr><td>跨模块关联</td><td>需求材料 / 任务引用 ↔ 独立规划包 / 执行记录</td><td>按各模块接口交接；可选 testingLinks 是引用，不迁移旧任务，也不统一两套编排。<br><a data-source href="../server/http/testing-links.ts">http/testing-links.ts</a> · <a data-source href="../server/testing/package-import.ts">testing/package-import.ts</a></td></tr>
+            <tr><td>共享契约与校验</td><td>src + server → shared；业务模块 → 对应领域校验器</td><td>前后端共享结构；字段、映射、HTML、用例覆盖与断言校验继续生效。<br><a data-source href="../shared/requirements.ts">shared/requirements.ts</a> · <a data-source href="../shared/testing.ts">shared/testing.ts</a> · <a data-source href="../server/requirements/validation.ts">requirements/validation.ts</a></td></tr>
+            <tr><td>产物与发布服务</td><td>业务模块 → 捕获 / 导出 / Git 发布</td><td>真实页面取证与原型截图分开。原型确认检查源内容和桌面视觉证据，不认证业务交互；Git 推送依赖人工确认。<br><a data-source href="../server/requirements/page-capture.ts">requirements/page-capture.ts</a> · <a data-source href="../server/requirements/html-policy.ts">requirements/html-policy.ts</a> · <a data-source href="../server/requirements/artifacts.ts">requirements/artifacts.ts</a> · <a data-source href="../server/git/publish.ts">git/publish.ts</a></td></tr>
+            <tr><td>分域持久化</td><td>各 Service / Worker → 域存储 → JSON 或 MySQL</td><td>需求及独立测试有各自 repository/runtime；保留运行租约和重启恢复规则。<br><a data-source href="../server/requirements/repository.ts">requirements/repository.ts</a> · <a data-source href="../server/requirements/runtime.ts">requirements/runtime.ts</a> · <a data-source href="../server/testing/repository.ts">testing/repository.ts</a> · <a data-source href="../server/testing/runtime.ts">testing/runtime.ts</a></td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="notice">技术栈：Node.js 22+、TypeScript 6、React 19、React Router 7、Vite 8、Express 5、Copilot SDK 1、Playwright、mysql2、docx / fflate。依赖的精确版本以 <a data-source href="../package.json">package.json</a> 及锁文件为准。</p>
+    </section>
+
+    <section id="flows" aria-labelledby="flows-title">
+      <div class="section-heading"><h2 id="flows-title"><span class="section-number">03</span>三条业务流程</h2><p>箭头表示业务主路径，不意味着模型可跳过确认自动推进</p></div>
+      <article class="panel workflow">
+        <h3>需求与设计</h3>
+        <ol class="flow">
+          <li><strong>材料与快照</strong><span>业务输入、代码、页面基线等来源</span></li>
+          <li><strong>分析与锚点蒸馏</strong><span>RequirementAgent 提取证据、澄清与路由壳子锚点</span></li>
+          <li><strong>保存功能分类</strong><span>平台 CAS 检查点；业务输入变化时失效</span></li>
+          <li><strong>逐区块保存映射</strong><span>预检会话保存源码验证提案；仅补充具体缺口</span></li>
+          <li><strong>真实页面取证</strong><span>关闭预检会话后浏览器同源只读采集各分支截图</span></li>
+          <li><strong>撰稿、修正与复验</strong><span>取证及候选单独记入审计；平台按路径合并补丁、复验后生成修订</span></li>
+          <li><strong>提取业务变更</strong><span>独立文本会话提出变更，平台核验修订与图片归属</span></li>
+          <li><strong>人工确认 PRD</strong><span>显式指纹校验当前版本与需求范围</span></li>
+          <li><strong>设计与自动校验</strong><span>平台检查完整画板；业务清单只关联能说明改动的目标状态</span></li>
+          <li><strong>确认与导出</strong><span>人工确认静态设计，导出保留交互未验证标识</span></li>
+        </ol>
+        <p>分析阶段沿“路由 → 绑定的 Layout 壳子 → 菜单 → 页面容器 → 目标组件与屏位”沉淀结构化 <code>sourceAnchors</code>，下游直接复用；<code>stageState</code> 核对阶段指纹。前置取证在启动浏览器或等待人工登录前关闭预检会话，取证后另开会话编写完整 PRD。开发规格保留字段、防回归规则、异常、权限、验收和完整状态映射。</p>
+        <p><strong>PRD 字段修正与恢复：</strong>平台集中诊断选项和验收引用，允许模型一次无工具定点补丁，逐项合并到候选后完整复验；新稿的其他可纠正格式问题仍至多纠正一次。取证依据和候选写入按属主、项目、作业隔离的<a data-source href="../server/requirements/conversation.ts">会话审计</a>，不是正式修订。只有用户显式继续才由<a data-source href="../server/requirements/service.ts">需求服务</a>读取相邻失败或中断作业；按输入指纹、分类和证据校验，实拍须重新核验文件归属与哈希，源码降级不变成实拍。只保存依据则直接撰稿，已有候选则只修字段；旧记录只有可证明的源码降级撰稿才兼容。从头生成跳过撰稿检查点和旧截图，不清空分析或答案，不恢复旧 SDK 会话、不自动审批。见<a data-source href="requirements-workspace.md">重试操作与限制</a>。</p>
+        <p><strong>业务评审：</strong>需求角色在独立、无工具的文本会话中依据原始需求、决定、分析证据、完整 PRD 和状态说明提出增删改及待核对项。平台用<a data-source href="../shared/business-review.ts">共享清单契约</a>核对引文、修订、功能及目标状态；纯后台条目禁止挂图。PRD 与设计作业可自动整理或重选图，失败不撤销完整稿。既有双模板通过 <code>business-review</code> 单独补充当前修订，受所有权、版本和单作业限制；不新增修订、不改变静态校验与审批。<a data-source href="../src/features/requirements/BusinessReview.tsx">业务网页</a>和<a data-source href="../server/requirements/artifacts.ts">业务 Word</a>读取同一清单；未整理不显示全量替代稿，引文核对不等于验证业务语义。</p>
+        <p>设计生成区分 <code>incremental</code>（绑定真实 <code>sourceAnchor</code> 锁定存量壳子与非改动区）与 <code>redesign</code>，状态支持声明 <code>proves</code> 及精准入镜模式（<code>viewport</code> + <code>scrollTo</code>、<code>element</code> 特写、<code>fullPage</code> 长图）。整份设计生成与单原型微调均由平台在隔离无脚本 Chrome 中自动生成截图、校验静态布局并在首次视觉检查失败时自动携带具体诊断重试一次；单原型微调兼容同一区块的多分支 <code>discover</code> 原始页面基线与源码复刻基线。</p>
+        <p>原型截图使用 <code>static-script-disabled</code> 模式、1600×1000 桌面视口及无凭据浏览器上下文，并拦截外部请求；这不是操作系统级网络隔离。静态输入框和按钮可表达固定状态，不因未点击或未提交而阻断确认。脚本、事件属性或违规资源仍是源内容错误；即使像素检查通过也不能确认。全量静态证据通过后，<code>interactionVerified</code> 仍为 <code>false</code>。</p>
+        <p>缺口问题的稳定标识绑定区块、缺口类型、路径与参数名，不绑定说明措辞。旧泛化问题已答后可补问新的具体详情缺口；相同具体缺口已答仍未解决则明确报错。空映射且无具体缺口在一次补查后属于模型结果不足，不能推断为用户遗漏全部入口。真实取证优先；映射完整且样式有可核实源码时，指定浏览器取证失败可转为源码复刻，修订记录失败类别与区块字段，不写入 <code>existingPages</code>。设计复用源码基线生成静态原型，评审与导出明确标注未验证真实运行态。</p>
+        <p><strong>可选的现状图作业：</strong>用户在<a data-source href="../src/features/requirements/SystemPageEvidence.tsx">系统证据区</a>发起 <code>reconstruct</code> → 平台校验当前修订、版本与取证指纹 → DesignAgent 在独立会话根据原始快照、定位信息和既有清单生成变更前 HTML，不接收目标稿、业务变更或设计截图 → <a data-source href="../server/requirements/source-reconstruction.ts">平台静态渲染</a>核对取景内字段和 PNG 后，整组登记到 <code>sourceFallback.images</code>。图片由所有者按修订读取并核验哈希；不会补拍、重跑 PRD、覆盖目标稿或改变审批状态。</p>
+        <p>具体列表或详情入口由用户提供。只有列表时，Agent 可按源码提出 <code>discover</code> 视图：记录名称列、链接渲染、打开函数、详情 pathname、查询键及字段；平台验证提案后，从该列最多前 20 个可见行中选择首个有链接的已有记录，点击真实链接取得参数。不允许操作列、表单内链接、猜 ID 或新建样例。兼容普通 href、源码佐证的 SPA 链接及 Ant Design 分离表头；自定义列表不在支持范围时明确失败。</p>
+        <p>发现过程仍限制主文档同源和 GET/HEAD，继承列表查询上下文，核对源码中的固定参数；首次真实详情导航后锁定具体 URL，重定向不得换计划。每区块最多 4 个分支、全任务最多 12 个取证视图、采集总时限仍为 120 秒。同一区块的不同分支分别保存 <code>viewId</code>、实际路径和截图，<code>capturePlan.views</code> 校验完整覆盖，不将某一类计划截图当作全部分支。空列表、无权限或不安全入口明确失败，不提交写请求。字段文字检查仍不等同于控件位置或业务语义验收。见 <a href="../server/requirements/capture-plan.ts">分类与基线指纹</a>、<a href="../server/requirements/capture-mapping.ts">逐区块映射</a>、<a href="../server/requirements/capture-discovery.ts">来源校验与记录打开</a>、<a href="../shared/requirement-preview.ts">入口合同</a>及 <a href="../server/requirements/page-capture.ts">实际浏览器执行</a>。</p>
+      </article>
+      <article class="panel workflow">
+        <h3>编码工作台 / 既有 CodingWorker 路径</h3>
+        <ol class="flow">
+          <li><strong>任务与附件</strong><span>编码目标、PRD、设计图</span></li>
+          <li><strong>工作区与编码</strong><span>Git 克隆 / 任务分支；CodingAgent</span></li>
+          <li><strong>工程检查</strong><span>平台运行仓库已有 test / build</span></li>
+          <li><strong>人工发布确认</strong><span>PUBLISH_PENDING；确认推送或明确跳过</span></li>
+          <li><strong>生成 / 评审自测</strong><span>确认后启动；规划、脚本编写、独立评审</span></li>
+          <li><strong>执行与结果</strong><span>平台运行测试；REVIEW / SUCCESS</span></li>
+        </ol>
+        <p>恢复和补跑继续沿用原任务与阶段产物。生成、评审、浏览器规划使用分阶段会话并共享父预算；编码完成不等于已获推送批准，自测成功也不把未选用例算作通过。</p>
+      </article>
+      <article class="panel workflow">
+        <h3>独立用例规划 / 执行</h3>
+        <ol class="flow">
+          <li><strong>导入来源</strong><span>材料、代码与来源指纹</span></li>
+          <li><strong>规划与独立评审</strong><span>TestPlanningAgent + test-review</span></li>
+          <li><strong>发布用例包</strong><span>平台门禁；不可变包与版本</span></li>
+          <li><strong>创建执行工作区</strong><span>绑定用例包与代码版本</span></li>
+          <li><strong>实现与准备确认</strong><span>模型提案 → 平台校验写入；安装及绑定审批</span></li>
+          <li><strong>实际执行</strong><span>平台 runner / Playwright；结构化结果与证据</span></li>
+        </ol>
+        <p>用例生成状态、设计评审结论、执行准备状态、真实运行结果分开保存和展示。环境失败不改写为设计失败，设计通过不代替实际运行通过。</p>
+      </article>
+    </section>
+
+    <section id="agents" aria-labelledby="agents-title">
+      <div class="section-heading"><h2 id="agents-title"><span class="section-number">04</span>受控 Agent 边界</h2><p>角色不是独立进程；平台可配置子角色，模型不能自行委派</p></div>
+      <div class="boundary">
+        <div class="layer-title">平台入口角色 <span>需求 / 设计 / 编码 / 独立测试规划 / 独立测试实现</span></div>
+        <div class="grid two">
+          <article class="node"><h3>CodingWorker 按自测阶段配置</h3><code>coding → test-planning / test-authoring / test-review / browser-planning</code><p>箭头表示平台代码选择角色；子角色与父角色共用根预算。不是模型之间发送任务。</p></article>
+          <article class="node"><h3>测试规划中的独立评审</h3><code>test-planning → test-review</code><p>评审创建全新阶段会话；原始依据与待评审定义是输入，脚本本身不能替代独立验收依据。</p></article>
+        </div>
+      </div>
+      <p class="notice">统一边界来源：<a data-source href="../server/agents/profiles.ts">agents/profiles.ts</a>、<a data-source href="../server/agents/runtime.ts">agents/runtime.ts</a>、<a data-source href="../server/agents/workspace.ts">agents/workspace.ts</a>。以下数字是每次根执行及对应角色的 SDK <code>send</code> / 工具尝试上限，不是 token 或金额硬上限。</p>
+      <div class="grid four" id="role-cards" style="margin-top:14px" aria-label="Agent 角色清单"></div>
+      <noscript><p class="notice">角色清单需要启用 JavaScript 展开：requirements、design、coding、test-planning、test-review、test-authoring、test-implementation、browser-planning。其余架构与流程可直接阅读。</p></noscript>
+      <div class="grid three guard">
+        <article class="node"><h3>交接与旧版本防护</h3><p>输入复制并冻结，交接记录版本和指纹；模型返回后及最终保存时核验来源，取消或过期结果不覆盖新版本。</p></article>
+        <article class="node"><h3>权限与执行防护</h3><p>角色限制与原权限取交集；直接文件访问限制工作区和精确只读附件。审批、安装、测试和发布仍由平台控制。</p></article>
+        <article class="node"><h3>预算、互斥与可观察性</h3><p>同资源执行互斥，子角色不能重置父预算；记录真实角色、父角色、运行 ID 和请求指纹。编码先保存完成审计，再标记成功。</p></article>
+      </div>
+      <p class="notice warning"><strong>当前限制：</strong>没有 OS 级沙箱、分布式队列或持久化图执行器；编码仍保留已有受控 shell。重启按原规则标记中断并显式继续 / 重试，不保证任意节点自动恢复或副作用 exactly-once。Agent completed 只表示调用结束，不代表 PRD 已确认、测试已通过或发布已获批准。</p>
+    </section>
+
+    <section id="maintenance" aria-labelledby="maintenance-title">
+      <div class="section-heading"><h2 id="maintenance-title"><span class="section-number">05</span>查阅与维护</h2><p>将本文件作为持续维护的架构入口</p></div>
+      <div class="panel maintenance">
+        <div><h3>每次架构变更，同步更新本图</h3><ul>
+          <li>涉及入口 / 路由、模块职责、Agent、模型调用、数据流、存储、执行或审批边界时，在同一变更中更新图、关系说明与核对日期。</li>
+          <li>图描述当前实现，不混入尚未落地的规划。源码链接使用相对路径；本文件不依赖 CDN、API、登录或外部字体。</li>
+          <li>路由、API 注册模块、主要组件名称、技术栈主版本及角色权限 / 预算由一致性测试核对。其余语义变化仍需变更者同步维护，并非运行时自动扫描。</li>
+        </ul></div>
+        <div><h3>入口与检查命令</h3><p>可双击本文件离线打开，或从仓库 README 的架构入口查阅。</p><div class="command">node --import tsx --test server/tests/ui/architecture.test.ts</div><p style="margin-top:12px"><a data-source href="../AGENTS.md">维护规则</a> · <a data-source href="../README.md">项目说明</a> · <a data-source href="server-organization.md">服务端职责与边界</a></p></div>
+      </div>
+    </section>
+    <footer><span>Code/Flow · Architecture reference</span><span>以当前源码为准；修改架构时同步维护，不把文档快照当作运行状态。</span></footer>
+  </main>
+  <script id="architecture-snapshot" type="application/json">
+  {
+    "routes": ["/", "/planning", "/execution", "/requirements", "/requirements/:projectId"],
+    "apiRegistrations": ["registerTaskReads", "registerExecutionBindings", "registerTestingRoutes", "registerTestingLinks", "registerRequirementsRoutes"],
+    "components": {"RequirementService":"server/requirements/service.ts","CodingWorker":"server/execution/worker.ts","CasePlanningService":"server/testing/planning-service.ts","TestExecutionService":"server/testing/execution-service.ts"},
+    "frameworks": {"react": 19, "react-router-dom": 7, "vite": 8, "express": 5, "typescript": 6, "@github/copilot-sdk": 1},
+    "prdAuthoring": {"policy":"prd-authoring-v1","checkpoint":"prd.checkpoint in owned project/job conversation audit","retry":"explicit PRD launch after adjacent failed/interrupted PRD; restartPrd:true bypasses draft and baseline images","repairPaths":["specification.fields[].options","specification.criteria[].refs"],"repairRequestsMax":1,"repairPathsMax":256,"toolsDuringRepair":false,"candidateCharactersMax":2000000,"approval":"complete validation then manual PRD confirmation"},
+    "sourceReconstruction": {"stage":"reconstruct","trigger":"explicit; current revision and matching classified source fallback only","model":"design role, fresh source-only session","renderer":"platform static-script-disabled Chrome","output":"capturePlan.sourceFallback.images; one owned PNG per existing block","read":"GET /api/requirements/projects/:id/source-reconstructions/:imageId?revision=:revisionId","approval":"unchanged on success, failure, cancellation or interruption"},
+    "businessReview": {"stage":"business-review","trigger":"automatic after v2 PRD or validated target design; explicit on current v2 revision","model":"requirements role, fresh text session, no tools or attachments","storage":"revision.businessReview in existing JSON payload","readers":["business PRD","business preview","business Word"],"checks":"verbatim PRD basis, requirement and current target state membership, no figures for logic","approval":"not part of static confirmation; development PRD and its mappings remain complete"},
+    "requirementCapture": {"scopePolicy":"functional-scope-checkpoint-v1","scopeStorage":"project JSON scopeCheckpoint; explicit retry only","mappingPolicy":"per-block-pages-and-gaps-v1","mappingStorage":"scopeCheckpoint.mapping; source-verified proposals, not screenshots; revalidate before reuse","mappingRetry":"one bounded correction, including discoverable ID gaps; stable specific gaps","discoveryPolicy":"source-backed-record-column-v1","discoveryViewsPerBlock":4,"captureViewsMax":12,"discoveryVisibleRowsMax":20,"captureCoverage":"capturePlan.views and existingPages.viewId; legacy single-view plans unchanged","entryPathsMax":12,"queryContext":"direct user-approved entries or real record navigation preserving inherited and source-fixed parameters","navigationBoundary":"same origin; GET/HEAD; source-backed list to detail; lock first concrete detail URL"},
+    "roles": {
+      "requirements": {"label":"需求 Agent","scope":"分析证据、澄清与编写 PRD；字段修正只提议指定路径的补丁；业务评审只提议变更和选图。两者禁工具，不执行代码或确认修订。","source":"server/requirements/model.ts","tools":["workspace_list","workspace_search","workspace_read","workspace_write_notes"],"permissions":[],"children":[],"maxRequests":12,"maxTools":128},
+      "design": {"label":"设计 Agent","scope":"基于已确认 PRD 生成或调整目标原型；现状图作业只按变更前源码生成提案。模型不截图、不确认。","source":"server/requirements/model.ts","tools":["workspace_list","workspace_search","workspace_read","workspace_write_notes","ui_ux_search"],"permissions":[],"children":[],"maxRequests":12,"maxTools":128},
+      "coding": {"label":"编码 Agent","scope":"在任务工作区实现代码；审批、发布和任务状态由平台控制。","source":"server/execution/coding-agent.ts","tools":null,"permissions":["read","write","shell"],"children":["test-planning","test-authoring","test-review","browser-planning"],"maxRequests":256,"maxTools":4096},
+      "test-planning": {"label":"测试规划 Agent","scope":"依据原始需求生成验收基线与用例定义，不执行测试。","source":"server/testing/planning-model.ts","tools":["view","glob","grep","ask_user"],"permissions":["read"],"children":["test-review"],"maxRequests":256,"maxTools":2048},
+      "test-review": {"label":"测试评审角色","scope":"独立核对定义与原始依据，返回问题；不能自行批准或修改。","source":"server/testing/planning-model.ts","tools":["view","glob","grep","ask_user"],"permissions":["read"],"children":[],"maxRequests":128,"maxTools":1024},
+      "test-authoring": {"label":"测试编写角色","scope":"编码自测中编写获准测试文件；不改业务代码或执行命令。","source":"server/execution/worker.ts","tools":null,"permissions":["read","write"],"children":[],"maxRequests":128,"maxTools":1024},
+      "test-implementation": {"label":"测试实现 Agent","scope":"独立执行中只读代码并返回结构化提案；由平台校验后写入。","source":"server/testing/execution-model.ts","tools":["view"],"permissions":["read"],"children":[],"maxRequests":1,"maxTools":256},
+      "browser-planning": {"label":"浏览器规划角色","scope":"依据需求与证据规划浏览器验证；不实际执行或声称通过。","source":"server/execution/worker.ts","tools":["view","glob","grep","ask_user"],"permissions":["read"],"children":[],"maxRequests":128,"maxTools":512}
+    }
+  }
+  </script>
+  <script>
+    const snapshot = JSON.parse(document.getElementById('architecture-snapshot').textContent)
+    const cards = document.getElementById('role-cards')
+    for (const [role, profile] of Object.entries(snapshot.roles)) {
+      const card = document.createElement('article')
+      card.className = 'panel role-card'
+      card.id = `role-${role}`
+      card.dataset.role = role
+      const title = document.createElement('h3')
+      title.textContent = profile.label
+      const name = document.createElement('code')
+      name.textContent = role
+      const scope = document.createElement('p')
+      scope.textContent = profile.scope
+      const facts = document.createElement('dl')
+      for (const [label, value] of [
+        ['SDK send', `${profile.maxRequests} 次`],
+        ['工具尝试', `${profile.maxTools} 次`],
+        ['权限种类', profile.permissions.join(' / ') || '仅专用工作区工具'],
+        ['工具范围', profile.tools ? profile.tools.join(' / ') : 'SDK 工具 + 原有权限和路径检查'],
+        ['平台子角色', profile.children.join(' / ') || '无'],
+      ]) {
+        const term = document.createElement('dt')
+        term.textContent = label
+        const definition = document.createElement('dd')
+        definition.textContent = value
+        facts.append(term, definition)
+      }
+      const sourceTerm = document.createElement('dt')
+      sourceTerm.textContent = '实现入口'
+      const source = document.createElement('dd')
+      const link = document.createElement('a')
+      link.href = `../${profile.source}`
+      link.dataset.source = ''
+      link.textContent = profile.source
+      source.append(link)
+      facts.append(sourceTerm, source)
+      card.append(title, name, scope, facts)
+      cards.append(card)
+    }
+    document.getElementById('print').addEventListener('click', () => window.print())
+  </script>
+</body>
+</html>

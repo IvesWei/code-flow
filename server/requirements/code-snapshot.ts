@@ -1,20 +1,41 @@
 import { createHash } from 'node:crypto'
 import { codeFileAllowed, codeSnapshotLimits } from '../../shared/requirement-code.js'
 
+export function normalizeCodeSnapshotText(text: string): string {
+  return text.replace(/\r\n?/g, '\n').replace(/^\d+\t/gm, '')
+}
+
+export function codeSnapshotContainsExcerpt(text: string, path: string, quote: string): boolean {
+  const marker = `Path: ${JSON.stringify(path)}`
+  const start = text.indexOf(marker)
+  if (start < 0 || !quote.trim()) return false
+  const next = text.indexOf('\nPath: ', start + marker.length)
+  const section = text.slice(start, next < 0 ? undefined : next)
+  return normalizeCodeSnapshotText(section).includes(normalizeCodeSnapshotText(quote))
+}
+
+export function codeSnapshotContainsPath(text: string, path: string): boolean {
+  return !!path.trim() && text.includes(`Path: ${JSON.stringify(path)}`)
+}
+
+export function normalizeFieldLabel(label: string): string {
+  return label
+    .replace(/^\s*[*＊]\s*/, '')
+    .replace(/^【(?:新增|变更|删除|既有)】\s*/u, '')
+    .replace(/[（(]\s*(?:必填|选填|可选|新增|变更|删除|既有)\s*[)）]\s*$/u, '')
+    .replace(/\s*[:：]\s*$/, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase()
+}
+
 function invalid(): never { throw new Error('Invalid or unsafe code snapshot') }
 function record(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value) || ![Object.prototype, null].includes(Object.getPrototypeOf(value)) || Object.keys(value).length !== 2 || !Object.hasOwn(value, 'path') || !Object.hasOwn(value, 'content')) invalid()
   return value as Record<string, unknown>
 }
 function containsCredentials(content: string): boolean {
-  if (/-----BEGIN[ A-Z0-9_-]*PRIVATE KEY-----|\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|AKIA[A-Z0-9]{16})\b|\bhttps?:\/\/[^\s/@:]+:[^\s/@]+@/i.test(content)) return true
-  const assignments = /(?:^|[^\w$.-])["']?([A-Za-z_$][\w$.-]*)["']?\s*(?::|=(?!=))\s*(?=(["'`]\s*[^\s"'`]|[A-Za-z0-9+/_=-]{8,32}))/g
-  for (const match of content.matchAll(assignments)) {
-    const key = match[1].replace(/[_.-]/g, '')
-    if (!/(?:password|passwd|pwd|secret|token|credentials?|apikey|accesskey(?:id)?|privatekey|connectionstring|authorization)$/i.test(key)) continue
-    if (/^(?:["'`]\s*[^\s"'`]|[A-Za-z0-9+/_=-]{8,})/.test(match[2]) && !/^(?:undefined|null|false|true)\b/.test(match[2])) return true
-  }
-  return /<(?:[\w.-]*:)?(?:password|passwd|secret|token|credential|api[_-]?key|private[_-]?key|connectionString)\b[^>]*>\s*[^\s<]/i.test(content)
+  return /-----BEGIN[ A-Z0-9_-]*PRIVATE KEY-----|\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|AKIA[A-Z0-9]{16})\b|\bhttps?:\/\/[^\s/@:]+:[^\s/@]+@/i.test(content)
 }
 
 export function createCodeSnapshot(value: unknown, limits: Readonly<{ files: number; fileBytes: number; totalBytes: number }> = codeSnapshotLimits): Buffer {

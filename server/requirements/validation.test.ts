@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
+import { inspectRequirementHtml } from './html-policy.js'
 import { RequirementOutputError, validateEvidence, validatePrd, validateQuestions, validateScreens } from './validation.js'
 import { requirementDiagnostic } from './diagnostics.js'
 
@@ -65,6 +66,15 @@ test('HTML policy accepts static URL text, SVG namespaces and self-contained ras
   ]) assert.equal(validateScreens([policyScreen(content)], prdFixture).length, 1, content)
 })
 
+test('static screenshot policy checks source capabilities, not the presence of controls', () => {
+  const violation = (content: string) => inspectRequirementHtml(policyScreen(content).html, 'static-script-disabled').violation
+  assert.equal(violation('<form><input><textarea></textarea><select><option>Draft</option></select><button>Save</button></form><a role="tab" tabindex="0" href="#details">Details</a>'), undefined)
+  assert.equal(violation('<button onclick="">Save</button>'), 'active_script')
+  assert.equal(violation('<script type="application/json">{}</script>'), 'active_script')
+  assert.equal(violation('<form action="/save"><button>Save</button></form>'), 'navigation_attribute')
+  assert.equal(violation('<noscript><img src="/image.png"></noscript>'), 'resource_attribute')
+})
+
 test('HTML policy identifies resource contexts and keeps diagnostics redacted', () => {
   const cases = [
     ['<iframe></iframe>', 'embedded_document'],
@@ -116,4 +126,11 @@ test('PRD module and field metadata round-trip without changing legacy contracts
   assert.deepEqual(validatePrd(prdFixture, ['SRC-1']), prdFixture)
   for (const module of [null, '', 1, 'x'.repeat(301)]) assert.throws(() => validatePrd({ ...enriched, blocks: [{ ...enriched.blocks[0], module }] }))
   for (const fields of [null, {}, [{ name: '', description: '' }], [{ name: 'Name' }], [{ name: 'Name', description: '', unexpected: true }], Array(201).fill({ name: 'Name', description: '' })]) assert.throws(() => validatePrd({ ...enriched, requirements: [{ ...enriched.requirements[0], fields }] }))
+  assert.throws(() => validatePrd({ ...enriched, requirements: [{ ...enriched.requirements[0], fields: [{ name: '测试报告', type: '文件上传', required: true, purpose: '说明', SECRET_TOKEN: 'private' }] }] }, ['SRC-1']), error => {
+    const diagnostic = requirementDiagnostic(error, 'output_validation')
+    assert.equal(diagnostic.code, 'OUTPUT_VALIDATION')
+    assert.match(diagnostic.message, /unexpected field \(prd\.requirements\[\]\.fields\[\] allows only name, description/)
+    assert.doesNotMatch(diagnostic.message, /SECRET_TOKEN|private/)
+    return true
+  })
 })

@@ -1,6 +1,6 @@
 import type { Express, Request, Response } from 'express'
 import multer from 'multer'
-import { unzipSync } from 'fflate'
+import { readRequirementScreenshot } from '../requirements/artifacts.js'
 import type { RequirementRepository } from '../../shared/requirements.js'
 import { allowedWorkbenchOrigin } from '../security/access.js'
 import { uploadName } from '../tasks/upload-name.js'
@@ -50,14 +50,22 @@ export function registerRequirementsRoutes(app: Express, repository: Requirement
   }
   route('get', '', async (_request, response, user) => response.json(await service!.list(user.ownerId)))
   route('post', '', async (request, response, user) => response.status(201).json(await service!.create(user.ownerId, request.body, user.token)))
-  route('get', '/:id', async (request, response, user) => response.json(await service!.detail(user.ownerId, request.params.id)))
-  route('patch', '/:id/preview', async (request, response, user) => response.json(await service!.configurePreview(user.ownerId, request.params.id, mutation(request.body, ['origin']), user.token)))
+  route('get', '/:id', async (request, response, user) => response.json(await service!.detailWithSourceProvenance(user.ownerId, request.params.id)))
+  route('patch', '/:id/preview', async (request, response, user) => response.json(await service!.configurePreview(user.ownerId, request.params.id, mutation(request.body, ['origin', 'entryPaths']), user.token)))
   route('get', '/:id/existing-pages/:screenId', async (request, response, user) => {
     const query = requirementObject(request.query, ['revision'])
     const project = await service!.detail(user.ownerId, request.params.id)
     const page = project.revisions.find(revision => revision.id === query.revision)?.existingPages?.find(page => page.image.id === request.params.screenId)
     if (!page) throw new RequirementServiceError(404, 'Existing page capture not found')
     const file = await readSourceFile(options.root, user.ownerId, project.id, page.image)
+    return response.type('png').send(file.buffer)
+  })
+  route('get', '/:id/source-reconstructions/:screenId', async (request, response, user) => {
+    const query = requirementObject(request.query, ['revision'])
+    const project = await service!.detail(user.ownerId, request.params.id)
+    const entry = project.revisions.find(revision => revision.id === query.revision)?.capturePlan?.sourceFallback?.images?.find(entry => entry.image.id === request.params.screenId)
+    if (!entry) throw new RequirementServiceError(404, 'Source reconstruction not found')
+    const file = await readSourceFile(options.root, user.ownerId, project.id, entry.image)
     return response.type('png').send(file.buffer)
   })
   route('post', '/:id/sources', async (request, response, user) => {
@@ -81,13 +89,13 @@ export function registerRequirementsRoutes(app: Express, repository: Requirement
   route('patch', '/:id/design', async (request, response, user) => response.json(await service!.editDesign(user.ownerId, request.params.id, mutation(request.body, ['screens']))))
   route('post', '/:id/revisions', async (request, response, user) => response.json(await service!.revise(user.ownerId, request.params.id, mutation(request.body, ['instruction']))))
   route('post', '/:id/confirm', async (request, response, user) => response.json(await service!.confirm(user.ownerId, request.params.id, mutation(request.body, ['target']))))
-  route('post', '/:id/jobs', async (request, response, user) => response.status(202).json(await service!.launch(user.ownerId, request.params.id, mutation(request.body, ['stage', 'instruction', 'screenId']), user.token)))
+  route('post', '/:id/jobs', async (request, response, user) => response.status(202).json(await service!.launch(user.ownerId, request.params.id, mutation(request.body, ['stage', 'instruction', 'screenId', 'revisionId', 'restartPrd']), user.token)))
   route('post', '/:id/jobs/:jobId/cancel', async (request, response, user) => response.json(await service!.cancel(user.ownerId, request.params.id, request.params.jobId, mutation(request.body, []))))
   route('post', '/:id/jobs/:jobId/login', async (request, response, user) => response.json(await service!.login(user.ownerId, request.params.id, request.params.jobId, mutation(request.body, ['action']))))
   route('get', '/:id/exports', async (request, response, user) => {
-    const query = requirementObject(request.query, ['revision', 'format'])
+    const query = requirementObject(request.query, ['revision', 'format', 'scope'])
     if (typeof query.revision !== 'string' || typeof query.format !== 'string') throw new RequirementServiceError(400, 'Specify revision and format')
-    const artifact = await service!.export(user.ownerId, request.params.id, query.revision, query.format)
+    const artifact = await service!.export(user.ownerId, request.params.id, query.revision, query.format, query.scope)
     response.set('Content-Disposition', `attachment; filename="${artifact.filename}"`)
     response.set('Content-Security-Policy', "default-src 'none'; sandbox")
     return response.type(artifact.contentType).send(artifact.buffer)
@@ -98,10 +106,8 @@ export function registerRequirementsRoutes(app: Express, repository: Requirement
     const project = await service!.detail(user.ownerId, request.params.id)
     const revision = project.revisions.find(item => item.id === query.revision)
     if (!revision?.screenshots?.some(item => item.screenId === request.params.screenId)) throw new RequirementServiceError(404, 'Screenshot not found')
-    const artifact = await service!.export(user.ownerId, project.id, revision.id, 'zip')
-    const image = unzipSync(artifact.buffer)[`screenshots/${request.params.screenId}.png`]
-    if (!image) throw new RequirementServiceError(404, 'Screenshot not found')
-    return response.type('png').send(Buffer.from(image))
+    const image = await readRequirementScreenshot(project, revision, request.params.screenId, options.root)
+    return response.type('png').send(image)
   })
   return service
 }

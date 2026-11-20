@@ -5,6 +5,21 @@ import { join } from 'node:path'
 import { test } from 'node:test'
 import { createRequirementWorkspace } from './workspace.js'
 
+test('workspace tool schemas advertise only the arguments accepted by each handler', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'requirements-workspace-schema-'))
+  try {
+    const workspace = await createRequirementWorkspace(root, [], new AbortController().signal, async () => {})
+    const expected: Record<string, string[]> = {
+      workspace_list: ['offset'], workspace_search: ['path', 'query', 'offset'],
+      workspace_read: ['path', 'startLine', 'count', 'characterOffset'], workspace_write_notes: ['path', 'text'],
+    }
+    for (const tool of workspace.tools) {
+      const schema = tool.parameters as { properties: Record<string, unknown> }
+      assert.deepEqual(Object.keys(schema.properties).sort(), expected[tool.name].sort())
+    }
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
 test('workspace scopes reads, literal searches and mutable notes, preserves sources and bounds output', async () => {
   const root = await mkdtemp(join(tmpdir(), 'requirements-workspace-test-'))
   const updates: string[] = []

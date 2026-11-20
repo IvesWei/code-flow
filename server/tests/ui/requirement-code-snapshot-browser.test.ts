@@ -91,6 +91,7 @@ test('local code directory: explicit relative JSON, CAS retry retention, disable
       return reply({ error: 'Unexpected fixture request' }, 400)
     })
     await page.goto(`${origin}/requirements/${projectId}`, { waitUntil: 'networkidle' })
+    await page.getByText('添加已有项目代码', { exact: true }).click()
     const form = page.getByRole('form', { name: '本地已有项目代码', exact: true })
     const input = form.getByLabel('项目目录', { exact: true })
     const add = form.getByRole('button', { name: '添加代码快照', exact: true })
@@ -150,14 +151,14 @@ test('local code directory: explicit relative JSON, CAS retry retention, disable
     await form.evaluate(element => { if (element instanceof HTMLFormElement) element.requestSubmit() })
     assert.equal(writes.length, 1)
     releaseConflict()
-    await expect(page.getByRole('alert')).toContainText('版本冲突')
+    await expect(page.getByRole('alert').first()).toContainText('版本冲突')
     await expect(add).toBeEnabled()
     await expect(form.getByRole('status')).toHaveText('候选 3 个文件 · 已排除 4 个文件')
     await expect(input).not.toHaveValue('')
     assert.equal(detailReads, initialDetailReads + 1)
     assert.equal((await reads()).length, 3)
     await add.click()
-    await expect(form.getByRole('status')).toHaveText('候选 0 个文件 · 已排除 0 个文件')
+    await expect(form.getByRole('status').filter({ hasText: '已排除' })).toHaveText('候选 0 个文件 · 已排除 0 个文件')
     await expect(input).toHaveValue('')
     await expect(page.getByText('代码快照（只读）', { exact: false })).toBeVisible()
     assert.equal(writes.length, 2)
@@ -168,7 +169,7 @@ test('local code directory: explicit relative JSON, CAS retry retention, disable
     await input.setInputFiles(selectedRoot)
     failRefresh = true
     await add.click()
-    await expect(page.getByRole('alert')).toContainText('模拟刷新失败')
+    await expect(page.getByRole('alert').first()).toContainText('模拟刷新失败')
     await expect(add).toBeDisabled()
     await expect(input).toBeDisabled()
     await expect(form.getByRole('status')).toHaveText('候选 3 个文件 · 已排除 4 个文件')
@@ -178,7 +179,7 @@ test('local code directory: explicit relative JSON, CAS retry retention, disable
     project.status = 'running'
     failRefresh = true
     await add.click()
-    await expect(page.getByRole('alert')).toContainText('模拟刷新失败')
+    await expect(page.getByRole('alert').first()).toContainText('模拟刷新失败')
     failRefresh = false
     await page.getByRole('button', { name: '重新读取', exact: true }).click()
     await expect(input).toBeDisabled()

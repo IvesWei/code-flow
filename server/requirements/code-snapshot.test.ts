@@ -10,15 +10,41 @@ test('shared code snapshot filter permits source/manifests and rejects unsafe or
   for (const path of ['', '/src/a.ts', '../a.ts', 'src/../a.ts', 'src/./a.ts', 'C:/a.ts', 'src\\a.ts', 'src//a.ts', '.git/config', 'src/.hidden/a.ts', 'src/a.ts.', 'src/a.ts ', 'src/%2e%2e/a.ts', 'node_modules/a.ts', 'dist/a.js', 'target/a.java', 'vendor/a.php', '.env', '.env.example', 'credentials.json', 'secrets/a.ts', 'certkeys/a.json', 'appsettings.Production.json', 'config/prod.yaml', 'package-lock.json', 'yarn.lock', 'pnpm-lock.yaml', 'Cargo.lock', 'go.sum', 'image.png', 'a.pem', 'a.bin', 'a.unknown', 'src/a.min.js', 'nul.ts']) assert.equal(codeFileAllowed(path), false, path)
 })
 
-test('snapshot rejects invalid entries, duplicates, secrets, binary and byte/count overflow without echoing input', () => {
+test('snapshot rejects invalid entries, duplicates, binary and byte/count overflow without echoing input', () => {
   const file = { path: 'src/main.ts', content: 'export const value = 1' }
-  for (const files of [undefined, null, {}, [], [null], [file, file], [file, { ...file, path: 'SRC/Main.ts' }], [{ ...file, extra: true }], [{ path: file.path }], [{ ...file, path: '../private.ts' }], [{ ...file, content: 3 }], [{ ...file, content: '\u0000' }], [{ ...file, content: '\ud800' }], [{ ...file, content: '-----BEGIN RSA PRIVATE KEY-----\nPRIVATE_SENTINEL' }], ...['const apiKey = "PRIVATE_SENTINEL"', 'password: PRIVATE_SENTINEL', '"client_secret": "PRIVATE_SENTINEL"', '<password>PRIVATE_SENTINEL</password>', 'const url = "https://user:PRIVATE_SENTINEL@example.com"'].map(content => [{ ...file, content }]), [{ ...file, content: 'a'.repeat(codeSnapshotLimits.fileBytes + 1) }], [{ ...file, content: '\u4e2d'.repeat(43691) }], Array.from({ length: 201 }, (_, index) => ({ ...file, path: `${index}.ts` })), Array.from({ length: 9 }, (_, index) => ({ ...file, path: `${index}.ts`, content: 'a'.repeat(codeSnapshotLimits.fileBytes) }))]) {
+  for (const files of [undefined, null, {}, [], [null], [file, file], [file, { ...file, path: 'SRC/Main.ts' }], [{ ...file, extra: true }], [{ path: file.path }], [{ ...file, path: '../private.ts' }], [{ ...file, content: 3 }], [{ ...file, content: '\u0000' }], [{ ...file, content: '\ud800' }], [{ ...file, content: 'a'.repeat(codeSnapshotLimits.fileBytes + 1) }], [{ ...file, content: '\u4e2d'.repeat(43691) }], Array.from({ length: 201 }, (_, index) => ({ ...file, path: `${index}.ts` })), Array.from({ length: 9 }, (_, index) => ({ ...file, path: `${index}.ts`, content: 'a'.repeat(codeSnapshotLimits.fileBytes) }))]) {
     assert.throws(() => createCodeSnapshot(files), { message: 'Invalid or unsafe code snapshot' })
   }
 })
 
+test('snapshot permits credential-named variables, UI metadata and template bindings without removing component code', () => {
+  for (const content of [
+    'const props = { token: currentToken, password: passwordValue };',
+    'const field = { authorization: "only-view", token: "pending", password: "" };',
+    'const state = { client_secret: secretReference, apiKey: this.apiKey, credentials: process.env.CREDENTIALS };',
+    'const header = { authorization: `Bearer ${sessionToken}` };',
+    '<template><password>{{ passwordValue }}</password><token>选项说明</token></template>',
+    'type Props = { token: string; password: string; authorization: "only-view" };',
+  ]) {
+    const snapshot = createCodeSnapshot([{ path: 'src/DevConfirmItem.vue', content }]).toString('utf8')
+    assert.ok(snapshot.includes(content), content)
+    assert.ok(snapshot.includes(`SHA-256: ${createHash('sha256').update(content).digest('hex')}`))
+  }
+})
+
+test('snapshot still rejects recognizable private keys, provider tokens and credential-bearing URLs', () => {
+  for (const content of [
+    '-----BEGIN RSA PRIVATE KEY-----\nPRIVATE_SENTINEL',
+    '-----BEGIN PRIVATE KEY-----\nPRIVATE_SENTINEL',
+    ...['ghp_', 'gho_', 'ghu_', 'ghs_', 'ghr_', 'github_pat_'].map(prefix => `const value = "${prefix}${'x'.repeat(36)}"`),
+    `const value = "AKIA${'A'.repeat(16)}"`,
+    ['const value = "https://', 'fixture-user:fixture-pass', '@example.invalid"'].join(''),
+  ]) {
+    assert.throws(() => createCodeSnapshot([{ path: 'src/main.ts', content }]), { message: 'Invalid or unsafe code snapshot' })
+  }
+})
+
 test('snapshot preserves UTF-8 hashes, line numbers and inert fenced content; exact limits are accepted', () => {
-  assert.throws(() => createCodeSnapshot([{ path: 'a.ts', content: 'const harmless = "ok"; const password = "PRIVATE_SENTINEL"' }]), { message: 'Invalid or unsafe code snapshot' })
   assert.ok(createCodeSnapshot([{ path: 'a.ts', content: '~ '.repeat(65536) }]).length)
   assert.ok(createCodeSnapshot([{ path: 'a.ts', content: 'value="x"; '.repeat(11000) }]).length)
   const content = 'export const label = "\u4e2d\u6587"\r\n~~~\n```\n# injected heading\n'

@@ -1,6 +1,7 @@
 import { SessionProgressTimeout } from '../execution/session-progress.js'
 import { RequirementOutputError } from './validation.js'
 import { htmlViolationDescriptions } from './html-policy.js'
+import { AgentBoundaryError } from '../agents/runtime.js'
 
 export type RequirementFailurePhase = 'skills' | 'design_search' | 'sources' | 'prompt' | 'session' | 'model' | 'parse' | 'output_validation' | 'prototype_validation' | 'storage'
 const descriptions: Record<RequirementFailurePhase, string> = {
@@ -9,7 +10,7 @@ const descriptions: Record<RequirementFailurePhase, string> = {
   sources: 'Source reading or controlled URL retrieval failed',
   prompt: 'Requirement input preparation failed or exceeded its limit',
   session: 'Copilot session initialization failed',
-  model: 'Copilot model request failed; no raw SDK error or output was retained',
+  model: 'Copilot model request failed; raw SDK errors and output are not exposed in job diagnostics',
   parse: 'Model response was not a valid JSON stage result',
   output_validation: 'Generated output failed contract validation',
   prototype_validation: 'Prototype artifact validation failed',
@@ -23,6 +24,9 @@ const rules = new Set([
   'standalone HTML required', 'external or unsafe HTML capability', 'HTML requirement mapping mismatch',
   'visual requirement not covered', 'visual acceptance not covered', 'screens too large',
   'design screen limit exceeded (maximum 40)',
+  'empty prototypes array', 'invalid prototype mode', 'incremental prototype requires sourceAnchor',
+  'invalid prototype capture mode', 'invalid prototype capture selector', 'element capture requires selector',
+  'selector is only allowed for element capture', 'invalid prototype capture padding',
   'invalid shared prototype or state definition', 'shared prototype contains unexpected fields',
   'duplicate prototype node', 'invalid prototype node element', 'prototype change target missing',
   'prototype change has no operation', 'prototype text change requires a leaf text element',
@@ -38,6 +42,7 @@ export class RequirementDiagnosticError extends Error {
 }
 export function requirementDiagnostic(error: unknown, phase: RequirementFailurePhase): RequirementDiagnosticError {
   if (error instanceof RequirementDiagnosticError) return error
+  if (error instanceof AgentBoundaryError) return new RequirementDiagnosticError(error.code === 'AGENT_STALE' ? 'output_validation' : 'model', error.code, error.message.replace(/^\[[A-Z_]+\] /, ''))
   if (error instanceof SessionProgressTimeout) return new RequirementDiagnosticError('model', 'MODEL_TIMEOUT', 'Model first-response or inactivity deadline exceeded; no automatic retry was made')
   if ((phase === 'model' || phase === 'session') && error instanceof Error) {
     const message = error.message
@@ -52,11 +57,18 @@ export function requirementDiagnostic(error: unknown, phase: RequirementFailureP
     for (const [pattern, code, description] of categories) if (pattern.test(message)) return new RequirementDiagnosticError(phase, code, description)
   }
   if (error instanceof RequirementOutputError) {
-    const rule = rules.has(error.rule) ? error.rule : 'output contract violation'
+    const isPrdTemplateRule = /^双模板 PRD：[\u4e00-\u9fa5A-Za-z0-9_\s,./=；：（）-]+$/.test(error.rule)
+    const rule = rules.has(error.rule) || isPrdTemplateRule ? error.rule : 'output contract violation'
     const category = error.htmlViolation && Object.hasOwn(htmlViolationDescriptions, error.htmlViolation) ? error.htmlViolation : undefined
     const screen = Number.isInteger(error.screenNumber) && error.screenNumber! >= 1 && error.screenNumber! <= 100 ? `screen ${error.screenNumber}; ` : ''
-    const detail = category ? `${screen}${category}: ${htmlViolationDescriptions[category]}` : `${screen}${rule}`
-    return new RequirementDiagnosticError('output_validation', 'OUTPUT_VALIDATION', `Generated output rejected: ${detail}`)
+    const location = error.context ? ` (${error.context})` : ''
+    const detail = category ? `${screen}${category}: ${htmlViolationDescriptions[category]}` : `${screen}${rule}${location}`
+    const hint = rule === 'invalid prototype node element'
+      ? '；data-prototype-node 仅支持普通 HTML 元素，不能绑定 SVG/MathML 或文档、样式等特殊标签'
+      : rule === 'empty prototypes array'
+        ? '；已确认的 PRD 包含可视化功能，模型不能返回空 prototypes 数组（无代码快照时应以 mode:"redesign" 生成原型）'
+        : ''
+    return new RequirementDiagnosticError('output_validation', 'OUTPUT_VALIDATION', `Generated output rejected: ${detail}${hint}`)
   }
   return new RequirementDiagnosticError(phase, phase.toUpperCase(), descriptions[phase])
 }

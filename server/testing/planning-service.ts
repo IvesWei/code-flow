@@ -8,7 +8,8 @@ import { defaultModel } from '../execution/models.js'
 import { recoverPlanningQuestion } from './planning-question.js'
 import { replacePlanningCase } from './planning-case.js'
 import { scopedPlanning } from './scoped-package.js'
-import { CopilotPlanningModel, PlanningError, planningDefinitions, planningDigest, planningEnvironment, planningRulesVersion, planningSecretPath, qualifiedPlanning, type PlanningModel } from './planning-model.js'
+import { TestPlanningAgent, PlanningError, planningDefinitions, planningDigest, planningEnvironment, planningRulesVersion, planningSecretPath, qualifiedPlanning, type PlanningModel } from './planning-model.js'
+import { AgentBoundaryError } from '../agents/runtime.js'
 
 export { PlanningError } from './planning-model.js'
 export type { PlanningModel } from './planning-model.js'
@@ -24,7 +25,7 @@ const boundary = (root: string, path: string) => { const local = relative(root, 
 export class CasePlanningService {
   private readonly active = activePlanning
 
-  constructor(private readonly repository: TestingRepository, private readonly root: string, private readonly model: PlanningModel = new CopilotPlanningModel()) {}
+  constructor(private readonly repository: TestingRepository, private readonly root: string, private readonly model: PlanningModel = new TestPlanningAgent()) {}
 
   async create(ownerId: number, input: PlanningInput): Promise<PlanningProject> {
     if (!Number.isSafeInteger(ownerId) || ownerId <= 0) throw new PlanningError('NOT_FOUND')
@@ -93,6 +94,12 @@ export class CasePlanningService {
       const sourceFingerprint = this.sourceFingerprint(input, referenceSnapshot)
       const result = await this.model.generate(input, {
         workspace, token, signal: controller.signal, previous, operation,
+        assertCurrent: async () => {
+          controller.signal.throwIfAborted()
+          const current = await this.project(ownerId, id)
+          if (current.status !== 'running' || marker(current)?.text !== marker(project)?.text || planningDigest(current.input) !== planningDigest(input)
+            || await this.referenceFingerprint(workspace, !!input.referenceRepository) !== referenceSnapshot) throw new AgentBoundaryError('AGENT_STALE')
+        },
         onProgress: text => save(current => ({ events: [...current.events, { at: now(), kind: 'info', text: `Model progress: ${this.sanitize(text, token)}` }] })),
         onDraft: draft => save(() => ({ draft: operation?.mode === 'optimize' ? this.optimizedDraft(previous!, draft, operation, sourceFingerprint) : this.safeDraft(draft, sourceFingerprint, token) })),
       })
@@ -259,13 +266,20 @@ export class CasePlanningService {
   }
 
   async cancel(ownerId: number, id: string): Promise<PlanningProject> {
-    const project = await this.project(ownerId, id)
-    if (project.status === 'cancelled') return project
-    if (project.status === 'completed') throw new PlanningError('CONFLICT')
-    if (project.status !== 'running') await this.ensurePublication(project)
-    const cancelled = await this.replace(project, { status: 'cancelled', events: [...project.events, { at: now(), kind: 'info', text: 'Planning cancelled.' }] })
-    this.active.get(this.activeId(id))?.abort()
-    return cancelled
+    for (let attempt = 0; attempt < 4; attempt++) {
+      const project = await this.project(ownerId, id)
+      if (project.status === 'cancelled') return project
+      if (project.status === 'completed') throw new PlanningError('CONFLICT')
+      if (project.status !== 'running') await this.ensurePublication(project)
+      try {
+        const cancelled = await this.replace(project, { status: 'cancelled', events: [...project.events, { at: now(), kind: 'info', text: 'Planning cancelled.' }] })
+        this.active.get(this.activeId(id))?.abort()
+        return cancelled
+      } catch (error) {
+        if (!(error instanceof PlanningError) || error.code !== 'CONFLICT' || attempt === 3) throw error
+      }
+    }
+    throw new PlanningError('CONFLICT')
   }
 
   private activeId(id: string): string {
